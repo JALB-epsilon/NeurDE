@@ -47,6 +47,8 @@ class SODSolver(nn.Module):
         self.ey2 = self.ey**2
         self.exey = self.ex * self.ey
         self.R = self.Cp-self.Cv  #gas constant
+        self.shifts_y = -self.ey1.int()
+        self.shifts_x = self.ex1.int()
 
     def dot_prod(self, ux, uy):
         return ux**2 + uy**2
@@ -61,10 +63,12 @@ class SODSolver(nn.Module):
     
     def get_heat_flux_Maxwellian(self, rho, ux, uy, E, T):
         H = E + T
-        qx = 2 * rho * ux * H
-        qy = 2 * rho * uy * H
+        rhoH2 = 2 * rho * H 
+        qx = rhoH2 * ux  
+        qy = rhoH2 * uy  
+        del H, rhoH2
         return qx, qy
-    
+        
     def get_density(self, F): 
         rho = torch.sum(F, dim=0).to(self.device)
         return rho
@@ -89,16 +93,18 @@ class SODSolver(nn.Module):
     
     def get_w(self, T):
         w = torch.zeros((self.Qn, self.Y, self.X)).to(self.device)
-        w[:4, :, :] = (1 - T) * T *0.5
+        one_minus_T = 1 - T
+        w[:4, :, :] = one_minus_T * T *0.5
         w[4:8, :, :] = T**2 *0.25
-        w[8, :, :] = (1 - T)**2
+        w[8, :, :] = one_minus_T**2
+        del one_minus_T
         return w    
     
     def get_relaxation_time(self, rho, T, F, Feq):
         tau_DL = self.muy / (rho * T) + 0.5
         diff = torch.abs(F - Feq) / Feq
         EPS = diff.mean(dim=0)
-        alpha = torch.full_like(EPS, 1.0)
+        alpha = torch.ones_like(EPS)
         alpha = torch.where(EPS < 0.01, torch.tensor(1.0, device=EPS.device), alpha)
         alpha = torch.where(EPS < 0.1, torch.tensor(self.alpha01, device=EPS.device), alpha)
         alpha = torch.where(EPS < 1, torch.tensor(self.alpha1, device=EPS.device), alpha)
@@ -158,8 +164,8 @@ class SODSolver(nn.Module):
         P_eqxx, P_eqyy, P_eqxy = self.get_maxwellian_pressure_tensor(rho, ux, uy, T)
         P_xx, P_yy, P_xy = self.get_pressure_tensor(F)
         diff_xy = P_xy - P_eqxy
-        qsx = 2 * ux * (P_xx - P_eqxx) + 2 * uy * diff_xy  # 2ubeta(diff Pressure tensor) in x
-        qsy = 2 * uy * (P_yy - P_eqyy) + 2 * ux * diff_xy # 2ubeta(diff Pressure tensor) in
+        qsx = 2 * ux * (P_xx - P_eqxx) + 2 * uy * diff_xy 
+        qsy = 2 * uy * (P_yy - P_eqyy) + 2 * ux * diff_xy 
         return qsx, qsy 
     
     def from_macro_to_lattice_Gis(self,F, rho, ux, uy, T):
@@ -186,29 +192,53 @@ class SODSolver(nn.Module):
         G_pos_collision = G - omega * (G - Geq) + (omega - omegaT) * Gis
         return F_pos_collision, G_pos_collision
     
+    def shift_operator(self, F, G):
+        q_indices = torch.arange(self.Qn, device=self.device)[:, None, None]
+        Y_indices = (torch.arange(self.Y, device=self.device)[None, :, None] - self.shifts_y[:, None, None]) % self.Y
+        X_indices = (torch.arange(self.X, device=self.device)[None, None, :] - self.shifts_x[:, None, None]) % self.X
+
+        Y_indices = Y_indices.expand(self.Qn, self.Y, self.X)
+        X_indices = X_indices.expand(self.Qn, self.Y, self.X)
+
+        Fi = F[q_indices, Y_indices, X_indices]
+        Gi = G[q_indices, Y_indices, X_indices]
+        return Fi, Gi
+    
     def streaming(self, F_pos_coll, G_pos_coll):
-        # Shift the domain
         Fo1, Go1 = self.interpolate_domain(F_pos_coll, G_pos_coll)
-        # Streaming
-        Fi = torch.zeros((self.Qn, self.Y, self.X)).to(self.device) 
-        Gi = torch.zeros((self.Qn, self.Y, self.X)).to(self.device)
-        for i in range(self.Qn):
-            shift_values = (-int(self.ey1[i].item()), int(self.ex1[i].item()))
-            Fi[i, :, :] = torch.roll(Fo1[i, :, :], shifts=shift_values, dims=(0, 1))
-            Gi[i, :, :] = torch.roll(Go1[i, :, :], shifts=shift_values, dims=(0, 1))
+        Fi, Gi = self.shift_operator(Fo1, Go1)      
         # boundary conditions
-        coly = np.arange(1, self.Y + 1) - 1
+        coly = torch.arange(1, self.Y + 1, device=self.device) - 1
         Gi[:, coly, 0] = Gi[:, coly, 1]
         Gi[:, coly, self.X - 1] = Gi[:, coly, self.X - 2]
         Fi[:, coly, 0] = Fi[:, coly, 1]
         Fi[:, coly, self.X - 1] = Fi[:, coly, self.X - 2]
         return Fi, Gi
     
+    '''  
+    def streaming(self, F_pos_coll, G_pos_coll):
+            # Shift the domain
+            Fo1, Go1 = self.interpolate_domain(F_pos_coll, G_pos_coll)
+            # Streaming
+            Fi = torch.zeros((self.Qn, self.Y, self.X)).to(self.device) 
+            Gi = torch.zeros((self.Qn, self.Y, self.X)).to(self.device)
+            for i in range(self.Qn):
+                shift_values = (-int(self.ey1[i].item()), int(self.ex1[i].item()))
+                Fi[i, :, :] = torch.roll(Fo1[i, :, :], shifts=shift_values, dims=(0, 1))
+                Gi[i, :, :] = torch.roll(Go1[i, :, :], shifts=shift_values, dims=(0, 1))
+            # boundary conditions
+            coly = np.arange(1, self.Y + 1) - 1
+            Gi[:, coly, 0] = Gi[:, coly, 1]
+            Gi[:, coly, self.X - 1] = Gi[:, coly, self.X - 2]
+            Fi[:, coly, 0] = Fi[:, coly, 1]
+            Fi[:, coly, self.X - 1] = Fi[:, coly, self.X - 2]
+            return Fi, Gi'''
+    
     def case_1_initial_conditions(self):
-        rho0 = torch.ones((self.Y, self.X))  # density
-        ux0 = torch.zeros((self.Y, self.X))  # fluid velocity in x
-        uy0 = torch.zeros((self.Y, self.X))  # fluid velocity in y
-        T0 = torch.ones((self.Y, self.X))  # temperature
+        rho0 = torch.ones((self.Y, self.X), device=self.device)  # density
+        ux0 = torch.zeros((self.Y, self.X), device=self.device)  # fluid velocity in x
+        uy0 = torch.zeros((self.Y, self.X), device=self.device)  # fluid velocity in y
+        T0 = torch.ones((self.Y, self.X), device=self.device)  # temperature
         rho0[:, :self.Lx + 1] = 0.5
         rho0[:, self.Lx + 1:] = 2
         T0[:, :self.Lx + 1] = 0.2  # temperature
@@ -225,12 +255,12 @@ class SODSolver(nn.Module):
     def case_2_initial_conditions(self):
         rho_max = 1.0
         p_max = 0.2
-        ux0 = torch.zeros((self.Y, self.X))  # fluid velocity in x
-        uy0 = torch.zeros((self.Y, self.X))  # fluid velocity in y
-        rho0 = torch.ones((self.Y, self.X))  # density
+        ux0 = torch.zeros((self.Y, self.X), device=self.device)  # fluid velocity in x
+        uy0 = torch.zeros((self.Y, self.X), device=self.device)  # fluid velocity in y
+        rho0 = torch.ones((self.Y, self.X), device=self.device)  # density
         rho0[:, :self.Lx+1] = 1 * rho_max
         rho0[:, self.Lx+1:] = 0.125 * rho_max
-        P0 = torch.zeros((self.Y, self.X))  # pressure
+        P0 = torch.zeros((self.Y, self.X), device=self.device)  # pressure
         P0[:, :self.Lx+1] = 1.0 * p_max
         P0[:, self.Lx+1:] = 0.1 * p_max
         T0 = P0/(rho0*self.R)
@@ -251,7 +281,7 @@ def main():
     import h5py
     from utilities import plot_simulation_results
     parser = argparse.ArgumentParser()
-    parser.add_argument('--device', type=int, default=0,
+    parser.add_argument('--device', type=int, default=3,
                         help='Choose the device index (0 for cpu, 1 for cuda:1, 2 for cuda:2, 3 for cuda:3)')
     parser.add_argument('--steps', type=int, default=1000)
     parser.add_argument('--save', dest='save', action='store_true', help='Save file in database')
@@ -264,25 +294,33 @@ def main():
     device = get_device(args.device)
 
     cases = {
-            1: {'X': 3001, 'Y': 5, 'Qn': 9, 'alpha1': 1.2, 'alpha01': 1.05,
-                'vuy': 2, 'Pr': 0.71, 'muy': 0.025, 'Uax': 0.06, 'Uay': 0.0, 'device': device,
+            1: {'X': 3001, 'Y': 5, 'Qn': 9, 'alpha1': 1.08, 'alpha01': 1.05,
+                'vuy': 2, 'Pr': 0.71, 'muy': 0.025, 'Uax': 0.057, 'Uay': 0.0, 'device': device,
                 'initial_conditions_func': 'case_1_initial_conditions', 'filename': 'SOD_case1.h5'},
-            2: {'X': 3001, 'Y': 5, 'Qn': 9, 'alpha1': 1.2, 'alpha01': 1.05,
+            2: {'X': 3001, 'Y': 5, 'Qn': 9, 'alpha1': 1.1, 'alpha01': 1.05,
                 'vuy': 1.4, 'Pr': 0.71, 'muy': 1e-4, 'Uax': 0.4, 'Uay': 0.0, 'device': device,
                 'initial_conditions_func': 'case_2_initial_conditions', 'filename': 'SOD_case2.h5'}
-        }
+            }
 
     case_params = cases[args.case]
     print(f"Case {args.case}: SOD shock tube problem")
 
-    sod_solver = SODSolver(X=case_params['X'], Y=case_params['Y'], Qn=case_params['Qn'], alpha1=case_params['alpha1'],
-                           alpha01=case_params['alpha01'], vuy=case_params['vuy'], Pr=case_params['Pr'],
-                           muy=case_params['muy'], Uax=case_params['Uax'], Uay=case_params['Uay'],
-                           device=case_params['device'])  
+    sod_solver = SODSolver(
+                            X=case_params['X'], 
+                            Y=case_params['Y'], 
+                            Qn=case_params['Qn'], 
+                            alpha1=case_params['alpha1'],
+                            alpha01=case_params['alpha01'], 
+                            vuy=case_params['vuy'],
+                            Pr=case_params['Pr'],
+                            muy=case_params['muy'], 
+                            Uax=case_params['Uax'], 
+                            Uay=case_params['Uay'],
+                            device=case_params['device']
+                            )  
 
     initial_conditions_func = getattr(sod_solver, case_params['initial_conditions_func'])
     Fi0, Gi0, khi0, zetax0, zetay0 = initial_conditions_func()
-
 
     all_rho = []
     all_ux = []
@@ -292,7 +330,8 @@ def main():
     all_Geq = []
     all_Fi0 = []
     all_Gi0 = []
-    
+    if args.plot:
+        os.makedirs('images', exist_ok=True)
     with torch.no_grad():  
         for i in tqdm(range(args.steps)):
             rho, ux, uy, E = sod_solver.get_macroscopic(Fi0, Gi0)
@@ -301,26 +340,23 @@ def main():
             Geq, khi, zetax, zetay = sod_solver.get_Geq_Newton_solver(rho, ux, uy, T, khi0, zetax0, zetay0)
             Fi0, Gi0 = sod_solver.collision(Fi0, Gi0, Feq, Geq, rho, ux, uy, T)
             Fi, Gi = sod_solver.streaming(Fi0, Gi0)
-            all_rho.append(rho.cpu().numpy())  # Convert to NumPy *before* appending
-            all_ux.append(ux.cpu().numpy())  # Convert to NumPy *before* appending
-            all_uy.append(uy.cpu().numpy())
-            all_T.append(T.cpu().numpy())
-            all_Feq.append(Feq.cpu().numpy())
-            all_Geq.append(Geq.cpu().numpy())
-            all_Fi0.append(Fi0.cpu().numpy())
-            all_Gi0.append(Gi0.cpu().numpy())
+            all_rho.append(detach(rho)) 
+            all_ux.append(detach(ux))
+            all_uy.append(detach(uy))
+            all_T.append(detach(T))
+            all_Feq.append(detach(Feq))
+            all_Geq.append(detach(Geq))
+            all_Fi0.append(detach(Fi0))
+            all_Gi0.append(detach(Gi0))
             Fi0 = Fi
             Gi0 = Gi
             khi0 = khi
             zetax0 = zetax
             zetay0 = zetay
-
-
-            os.makedirs('images', exist_ok=True)
-            if args.plot:
-                if i % 100 == 0:
-                    P = sod_solver.get_pressure(T, rho)
-                    plot_simulation_results(rho, ux, T, P, i, args.case) #(rho, ux, T, P, i, case_number):
+           
+            if args.plot and (i % 100 == 0):
+                P = sod_solver.get_pressure(T, rho)
+                plot_simulation_results(rho, ux, T, P, i, args.case) #(rho, ux, T, P, i, case_number):
 
         if args.save:
             os.makedirs('data_base', exist_ok=True)
@@ -333,7 +369,6 @@ def main():
                 f.create_dataset('Geq', data=all_Geq)
                 f.create_dataset('Fi0', data=all_Fi0)
                 f.create_dataset('Gi0', data=all_Gi0) 
-
 
 if __name__=="__main__":
     main()
