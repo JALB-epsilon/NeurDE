@@ -1,0 +1,17 @@
+name: NeurDE
+channels:
+  - conda-forge
+  - pytorch
+  - defaults  
+dependencies:
+  - python=3.9
+  - pytorch=2.5.1 
+  - torchvision=0.20.1 
+  - torchaudio=2.5.1
+  - numpy>=1.24
+  - matplotlib
+  - scipy
+  - numba
+  - ipython
+  - tqdm
+  - h5py
