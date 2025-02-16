@@ -1,0 +1,26 @@
+1:
+  X: 3001
+  Y: 5
+  Qn: 9
+  alpha1: 1.08
+  alpha01: 1.05
+  vuy: 2
+  Pr: 0.71
+  muy: 0.025
+  Uax: 0.057
+  Uay: 0.0
+  initial_conditions_func: 'case_1_initial_conditions'
+  filename: 'SOD_case1.h5'
+2:
+  X: 3001
+  Y: 5
+  Qn: 9
+  alpha1: 1.1
+  alpha01: 1.05
+  vuy: 1.4
+  Pr: 0.71
+  muy: 1.0e-4 
+  Uax: 0.4
+  Uay: 0.0
+  initial_conditions_func: 'case_2_initial_conditions'
+  filename: 'SOD_case2.h5'

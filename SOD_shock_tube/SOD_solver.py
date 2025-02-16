@@ -279,6 +279,7 @@ def main():
     import argparse
     import os
     import h5py
+    import yaml
     from utilities import plot_simulation_results
     parser = argparse.ArgumentParser()
     parser.add_argument('--device', type=int, default=3,
@@ -290,19 +291,16 @@ def main():
     parser.add_argument("--plot", dest='plot', action='store_true', help='Plot the results', default=False)
     parser.set_defaults(save=True)
 
+
     args = parser.parse_args()
     device = get_device(args.device)
 
-    cases = {
-            1: {'X': 3001, 'Y': 5, 'Qn': 9, 'alpha1': 1.08, 'alpha01': 1.05,
-                'vuy': 2, 'Pr': 0.71, 'muy': 0.025, 'Uax': 0.057, 'Uay': 0.0, 'device': device,
-                'initial_conditions_func': 'case_1_initial_conditions', 'filename': 'SOD_case1.h5'},
-            2: {'X': 3001, 'Y': 5, 'Qn': 9, 'alpha1': 1.1, 'alpha01': 1.05,
-                'vuy': 1.4, 'Pr': 0.71, 'muy': 1e-4, 'Uax': 0.4, 'Uay': 0.0, 'device': device,
-                'initial_conditions_func': 'case_2_initial_conditions', 'filename': 'SOD_case2.h5'}
-            }
+    with open("Sod_cases_param.yaml", 'r') as f: 
+        cases = yaml.load(f, Loader=yaml.FullLoader)    
 
     case_params = cases[args.case]
+    case_params['device'] = device
+    
     print(f"Case {args.case}: SOD shock tube problem")
 
     sod_solver = SODSolver(

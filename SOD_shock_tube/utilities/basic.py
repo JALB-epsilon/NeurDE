@@ -14,6 +14,7 @@ def get_device(device_index):
     return selected_device
 
 
+
 def plot_simulation_results(rho, ux, T, P, i, case_number):
     """Plots and saves simulation results with larger title and reduced whitespace."""
 
