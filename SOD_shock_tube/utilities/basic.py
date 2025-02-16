@@ -11,40 +11,40 @@ def get_device(device_index):
     selected_device = device_map.get(device_index, 'cpu')
     if selected_device.startswith('cuda') and not torch.cuda.is_available():
         selected_device = 'cpu'
-    return 
+    return selected_device
 
 
 def plot_simulation_results(rho, ux, T, P, i, case_number):
-    """Plots and saves simulation results (temperature, density, velocity, pressure)"""
+    """Plots and saves simulation results with larger title and reduced whitespace."""
 
-    plt.figure(figsize=(15, 10))
-    
-    # Add a bold title for the whole figure
-    plt.suptitle(f'SOD shock case {case_number} time {i}', fontweight='bold')
+    plt.figure(figsize=(16, 6))
+
+    # Larger title and reduced whitespace
+    plt.suptitle(f'SOD shock case {case_number} time {i}', fontweight='bold', fontsize=25, y=0.95) 
+
+    linewidth = 5
 
     plt.subplot(221)
-    plt.plot(detach(rho[2, :]))
-    plt.title('Density')
+    plt.plot(detach(rho[2, :]), linewidth=linewidth)
+    plt.title('Density', fontsize=18)  # Slightly increased fontsize
 
     plt.subplot(222)
-    plt.plot(detach(T[2, :]))
-    plt.title('Temperature')
+    plt.plot(detach(T[2, :]), linewidth=linewidth)
+    plt.title('Temperature', fontsize=18)
 
     plt.subplot(223)
-    plt.plot(detach(ux[2, :]))
-    plt.title('Velocity in x')
+    plt.plot(detach(ux[2, :]), linewidth=linewidth)
+    plt.title('Velocity in x', fontsize=18)
 
     plt.subplot(224)
-    plt.plot(detach(P[2, :]))
-    plt.title('Pressure')
+    plt.plot(detach(P[2, :]), linewidth=linewidth)
+    plt.title('Pressure', fontsize=18)
 
-    # Adjust the layout to minimize white space
-    plt.tight_layout(rect=[0, 0, 1, 0.96])  # Adjust rect to make room for suptitle
+    # Reduced whitespace - Key changes here:
+    plt.tight_layout(rect=[0, 0, 1, 0.95], h_pad=0.35, w_pad=0.35)  
 
-    # Get the directory of the *main script* (not basic.py)
-    main_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # Go up two levels
-
-    image_dir = os.path.join(main_dir, f'images/ SOD_case{case_number}')  # images folder in the main directory
+    main_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    image_dir = os.path.join(main_dir, f'images/ SOD_case{case_number}')
     os.makedirs(image_dir, exist_ok=True)
     plt.savefig(os.path.join(image_dir, f'SOD_case{case_number}_{i}.png'))
     plt.close()

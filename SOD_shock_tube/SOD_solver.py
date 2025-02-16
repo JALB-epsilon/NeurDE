@@ -318,6 +318,14 @@ def main():
                             Uay=case_params['Uay'],
                             device=case_params['device']
                             )  
+    
+
+    sod_solver.collision = torch.compile(sod_solver.collision)
+    sod_solver.streaming = torch.compile(sod_solver.streaming)  
+    sod_solver.shift_operator = torch.compile(sod_solver.shift_operator)
+    sod_solver.get_macroscopic = torch.compile(sod_solver.get_macroscopic)
+    sod_solver.get_Feq = torch.compile(sod_solver.get_Feq)
+
 
     initial_conditions_func = getattr(sod_solver, case_params['initial_conditions_func'])
     Fi0, Gi0, khi0, zetax0, zetay0 = initial_conditions_func()
