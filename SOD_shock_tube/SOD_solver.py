@@ -1,6 +1,5 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import numpy as np
 from src import F_pop_torch, levermore_Geq
 from utilities import detach, get_device
@@ -300,7 +299,7 @@ def main():
 
     case_params = cases[args.case]
     case_params['device'] = device
-    
+
     print(f"Case {args.case}: SOD shock tube problem")
 
     sod_solver = SODSolver(
