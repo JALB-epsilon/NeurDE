@@ -214,25 +214,6 @@ class SODSolver(nn.Module):
         Fi[:, coly, self.X - 1] = Fi[:, coly, self.X - 2]
         return Fi, Gi
     
-    '''  
-    def streaming(self, F_pos_coll, G_pos_coll):
-            # Shift the domain
-            Fo1, Go1 = self.interpolate_domain(F_pos_coll, G_pos_coll)
-            # Streaming
-            Fi = torch.zeros((self.Qn, self.Y, self.X)).to(self.device) 
-            Gi = torch.zeros((self.Qn, self.Y, self.X)).to(self.device)
-            for i in range(self.Qn):
-                shift_values = (-int(self.ey1[i].item()), int(self.ex1[i].item()))
-                Fi[i, :, :] = torch.roll(Fo1[i, :, :], shifts=shift_values, dims=(0, 1))
-                Gi[i, :, :] = torch.roll(Go1[i, :, :], shifts=shift_values, dims=(0, 1))
-            # boundary conditions
-            coly = np.arange(1, self.Y + 1) - 1
-            Gi[:, coly, 0] = Gi[:, coly, 1]
-            Gi[:, coly, self.X - 1] = Gi[:, coly, self.X - 2]
-            Fi[:, coly, 0] = Fi[:, coly, 1]
-            Fi[:, coly, self.X - 1] = Fi[:, coly, self.X - 2]
-            return Fi, Gi'''
-    
     def case_1_initial_conditions(self):
         rho0 = torch.ones((self.Y, self.X), device=self.device)  # density
         ux0 = torch.zeros((self.Y, self.X), device=self.device)  # fluid velocity in x
