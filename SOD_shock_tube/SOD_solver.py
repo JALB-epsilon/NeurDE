@@ -361,13 +361,13 @@ def main():
            
             if args.plot and (i % 100 == 0):
                 P = sod_solver.get_pressure(T, rho)
-                plot_simulation_results(rho, ux, T, P, i, args.case) #(rho, ux, T, P, i, case_number):
+                plot_simulation_results(rho, ux, T, P, i, args.case)
 
         if args.save:
             os.makedirs('data_base', exist_ok=True)
             with h5py.File(f'data_base/SOD_case{args.case}.h5', 'w') as f:
-                f.create_dataset('rho', data=all_rho)  # Now this will work
-                f.create_dataset('ux', data=all_ux)  # Now this will work
+                f.create_dataset('rho', data=all_rho) 
+                f.create_dataset('ux', data=all_ux)  
                 f.create_dataset('uy', data=all_uy)
                 f.create_dataset('T', data=all_T)
                 f.create_dataset('Feq', data=all_Feq)
