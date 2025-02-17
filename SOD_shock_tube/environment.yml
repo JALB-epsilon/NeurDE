@@ -15,4 +15,5 @@ dependencies:
   - ipython
   - tqdm
   - h5py
+  - pyyaml
   - yaml

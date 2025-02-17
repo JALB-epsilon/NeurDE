@@ -1,29 +1,36 @@
-import torch
 import torch.nn as nn
-import numpy as np
-from src import F_pop_torch, levermore_Geq
-from utilities import detach, get_device
+import torch       
 
-
-class SODSolver(nn.Module):
-    def __init__(self, X=3001, Y=5, Qn=9,
-                 alpha1=1.2,
+class Cylinder_base(nn.Module):
+    def __init__(self,
+                 X=500,
+                 Y=300,
+                 Qn=9,
+                 CXR=None,
+                 CYR=None,
+                 R=20,
+                 Ma0=1.7,
+                 Re=300,
+                 ALPHA=0,
+                 alpha1=1.35,
                  alpha01=1.05,
-                 vuy=2,
+                 vuy=1.4,
                  Pr=0.71,
-                 muy=0.025,
-                 Uax=0.0,
-                 Uay=0.0,
+                 Uax=None,
+                 Uay=0,
                  device='cuda'):
-        super().__init__()
+        super(Cylinder_base, self).__init__()
         self.X = X
         self.Y = Y
+        if CXR or CYR is None:
+            self.CXR = round(self.X / 3)-1  # center in x for the circular cylinder
+            self.CYR = round(self.Y / 2)-1  # center in y for the circular cylinder
         self.Qn = Qn
         self.alpha1 = alpha1
         self.alpha01 = alpha01
         self.vuy = vuy
         self.Pr = Pr
-        self.muy = muy
+        self.R = R #radius
         self.Uax = Uax
         self.Uay = Uay
         self.device = device
@@ -213,167 +220,3 @@ class SODSolver(nn.Module):
         Fi[:, coly, 0] = Fi[:, coly, 1]
         Fi[:, coly, self.X - 1] = Fi[:, coly, self.X - 2]
         return Fi, Gi
-    
-    '''  
-    def streaming(self, F_pos_coll, G_pos_coll):
-            # Shift the domain
-            Fo1, Go1 = self.interpolate_domain(F_pos_coll, G_pos_coll)
-            # Streaming
-            Fi = torch.zeros((self.Qn, self.Y, self.X)).to(self.device) 
-            Gi = torch.zeros((self.Qn, self.Y, self.X)).to(self.device)
-            for i in range(self.Qn):
-                shift_values = (-int(self.ey1[i].item()), int(self.ex1[i].item()))
-                Fi[i, :, :] = torch.roll(Fo1[i, :, :], shifts=shift_values, dims=(0, 1))
-                Gi[i, :, :] = torch.roll(Go1[i, :, :], shifts=shift_values, dims=(0, 1))
-            # boundary conditions
-            coly = np.arange(1, self.Y + 1) - 1
-            Gi[:, coly, 0] = Gi[:, coly, 1]
-            Gi[:, coly, self.X - 1] = Gi[:, coly, self.X - 2]
-            Fi[:, coly, 0] = Fi[:, coly, 1]
-            Fi[:, coly, self.X - 1] = Fi[:, coly, self.X - 2]
-            return Fi, Gi'''
-    
-    def case_1_initial_conditions(self):
-        rho0 = torch.ones((self.Y, self.X), device=self.device)  # density
-        ux0 = torch.zeros((self.Y, self.X), device=self.device)  # fluid velocity in x
-        uy0 = torch.zeros((self.Y, self.X), device=self.device)  # fluid velocity in y
-        T0 = torch.ones((self.Y, self.X), device=self.device)  # temperature
-        rho0[:, :self.Lx + 1] = 0.5
-        rho0[:, self.Lx + 1:] = 2
-        T0[:, :self.Lx + 1] = 0.2  # temperature
-        T0[:, self.Lx + 1:] = 0.025  # temperature
-        khi0 = np.zeros((self.Y, self.X))  # Lagrange multipliers for g, this is for density
-        zetax0 = np.zeros((self.Y, self.X))  # Lagrange multipliers for g, this is for velocity in x
-        zetay0 = np.zeros((self.Y, self.X))  # Lagrange multipliers for g, this is for velocity in y
-        Fi0 = self.get_Feq(rho0, ux0, uy0, T0)  # F_i population
-        Gi0, khi, zetax, zetay = self.get_Geq_Newton_solver(rho0, ux0, uy0, T0, khi0, zetax0, zetay0) # G_i population                                     
-        Fi0 =Fi0.to(self.device)
-        Gi0 = Gi0.to(self.device)
-        return Fi0, Gi0, khi, zetax, zetay
-    
-    def case_2_initial_conditions(self):
-        rho_max = 1.0
-        p_max = 0.2
-        ux0 = torch.zeros((self.Y, self.X), device=self.device)  # fluid velocity in x
-        uy0 = torch.zeros((self.Y, self.X), device=self.device)  # fluid velocity in y
-        rho0 = torch.ones((self.Y, self.X), device=self.device)  # density
-        rho0[:, :self.Lx+1] = 1 * rho_max
-        rho0[:, self.Lx+1:] = 0.125 * rho_max
-        P0 = torch.zeros((self.Y, self.X), device=self.device)  # pressure
-        P0[:, :self.Lx+1] = 1.0 * p_max
-        P0[:, self.Lx+1:] = 0.1 * p_max
-        T0 = P0/(rho0*self.R)
-        khi0 = np.zeros((self.Y, self.X))  
-        zetax0 = np.zeros((self.Y, self.X))  
-        zetay0 = np.zeros((self.Y, self.X))  
-        Fi0 = self.get_Feq(rho0, ux0, uy0, T0)  # F_i population
-        Gi0, khi, zetax, zetay = self.get_Geq_Newton_solver(rho0, ux0, uy0, T0, khi0, zetax0, zetay0) # G_i population
-        Fi0 = Fi0.to(self.device)
-        Gi0 = Gi0.to(self.device)
-        return Fi0, Gi0, khi, zetax, zetay
-    
-
-def main():
-    from tqdm import tqdm
-    import argparse
-    import os
-    import h5py
-    import yaml
-    from utilities import plot_simulation_results
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--device', type=int, default=3,
-                        help='Choose the device index (0 for cpu, 1 for cuda:1, 2 for cuda:2, 3 for cuda:3)')
-    parser.add_argument('--steps', type=int, default=1000)
-    parser.add_argument('--save', dest='save', action='store_true', help='Save file in database')
-    parser.add_argument('--no-save', dest='save', action='store_false', help='Do not save file in database')
-    parser.add_argument('--case', type=int, choices=[1, 2], help='Choose case 1 or 2', default=1)
-    parser.add_argument("--plot", dest='plot', action='store_true', help='Plot the results', default=False)
-    parser.set_defaults(save=True)
-
-
-    args = parser.parse_args()
-    device = get_device(args.device)
-
-    with open("Sod_cases_param.yml", 'r') as f: 
-        cases = yaml.load(f, Loader=yaml.FullLoader)    
-
-    case_params = cases[args.case]
-    case_params['device'] = device
-
-    print(f"Case {args.case}: SOD shock tube problem")
-
-    sod_solver = SODSolver(
-                            X=case_params['X'], 
-                            Y=case_params['Y'], 
-                            Qn=case_params['Qn'], 
-                            alpha1=case_params['alpha1'],
-                            alpha01=case_params['alpha01'], 
-                            vuy=case_params['vuy'],
-                            Pr=case_params['Pr'],
-                            muy=case_params['muy'], 
-                            Uax=case_params['Uax'], 
-                            Uay=case_params['Uay'],
-                            device=case_params['device']
-                            )  
-    
-
-    sod_solver.collision = torch.compile(sod_solver.collision)
-    sod_solver.streaming = torch.compile(sod_solver.streaming)  
-    sod_solver.shift_operator = torch.compile(sod_solver.shift_operator)
-    sod_solver.get_macroscopic = torch.compile(sod_solver.get_macroscopic)
-    sod_solver.get_Feq = torch.compile(sod_solver.get_Feq)
-
-
-    initial_conditions_func = getattr(sod_solver, case_params['initial_conditions_func'])
-    Fi0, Gi0, khi0, zetax0, zetay0 = initial_conditions_func()
-
-    all_rho = []
-    all_ux = []
-    all_uy = []
-    all_T = []
-    all_Feq = []
-    all_Geq = []
-    all_Fi0 = []
-    all_Gi0 = []
-    if args.plot:
-        os.makedirs('images', exist_ok=True)
-    with torch.no_grad():  
-        for i in tqdm(range(args.steps)):
-            rho, ux, uy, E = sod_solver.get_macroscopic(Fi0, Gi0)
-            T = sod_solver.get_temp_from_energy(ux, uy, E)
-            Feq = sod_solver.get_Feq(rho, ux, uy, T)
-            Geq, khi, zetax, zetay = sod_solver.get_Geq_Newton_solver(rho, ux, uy, T, khi0, zetax0, zetay0)
-            Fi0, Gi0 = sod_solver.collision(Fi0, Gi0, Feq, Geq, rho, ux, uy, T)
-            Fi, Gi = sod_solver.streaming(Fi0, Gi0)
-            all_rho.append(detach(rho)) 
-            all_ux.append(detach(ux))
-            all_uy.append(detach(uy))
-            all_T.append(detach(T))
-            all_Feq.append(detach(Feq))
-            all_Geq.append(detach(Geq))
-            all_Fi0.append(detach(Fi0))
-            all_Gi0.append(detach(Gi0))
-            Fi0 = Fi
-            Gi0 = Gi
-            khi0 = khi
-            zetax0 = zetax
-            zetay0 = zetay
-           
-            if args.plot and (i % 100 == 0):
-                P = sod_solver.get_pressure(T, rho)
-                plot_simulation_results(rho, ux, T, P, i, args.case) #(rho, ux, T, P, i, case_number):
-
-        if args.save:
-            os.makedirs('data_base', exist_ok=True)
-            with h5py.File(f'data_base/SOD_case{args.case}.h5', 'w') as f:
-                f.create_dataset('rho', data=all_rho)  # Now this will work
-                f.create_dataset('ux', data=all_ux)  # Now this will work
-                f.create_dataset('uy', data=all_uy)
-                f.create_dataset('T', data=all_T)
-                f.create_dataset('Feq', data=all_Feq)
-                f.create_dataset('Geq', data=all_Geq)
-                f.create_dataset('Fi0', data=all_Fi0)
-                f.create_dataset('Gi0', data=all_Gi0) 
-
-if __name__=="__main__":
-    main()
