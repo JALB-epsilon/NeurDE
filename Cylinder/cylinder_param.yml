@@ -1,9 +1,7 @@
 X: 500
 Y: 300
 Qn: 9
-CXR: null
-CYR: null
-R: 20
+radius: 20
 Ma0: 1.8
 Re: 300
 rho0: 1.

@@ -9,9 +9,7 @@ class Cylinder_base(nn.Module):
                 X=500,
                 Y=300,
                 Qn=9,
-                CXR=None,
-                CYR=None,
-                R=20,
+                radius=20,
                 Ma0=1.7,
                 Re=300,
                 rho0=1,
@@ -21,19 +19,19 @@ class Cylinder_base(nn.Module):
                 vuy=1.4,
                 Pr=0.71,
                 Ns=0.6,
-                device='cuda'):
+                device='cuda'
+                ):
         super(Cylinder_base, self).__init__()
         self.X = X
         self.Y = Y
-        if CXR or CYR is None:
-            self.CXR = round(self.X / 3)-1  # center in x for the circular cylinder
-            self.CYR = round(self.Y / 2)-1  # center in y for the circular cylinder        
+        self.CXR = round(self.X / 3)-1  # center in x for the circular cylinder
+        self.CYR = round(self.Y / 2)-1  # center in y for the circular cylinder        
         self.Qn = Qn
         self.alpha1 = alpha1
         self.alpha01 = alpha01
         self.vuy = vuy
         self.Pr = Pr
-        self.R = R #radius
+        self.radius = radius 
         self.rho0 = rho0
         self.T0 = T0
         self.Ns = Ns
@@ -49,7 +47,6 @@ class Cylinder_base(nn.Module):
         self.ey1 = torch.tensor(ey_values, dtype=torch.float32, device=self.device)
         del ex_values, ey_values
         self.get_derived_quantities()
-        self.Lx = self.X // 2
         self.create_obstacle()
 
     def get_shift_constants(self):
@@ -76,24 +73,28 @@ class Cylinder_base(nn.Module):
 
 
         # Create the column vectors for BCs
-        self.colp = np.arange(1, self.Y-1)
-        self.colx = np.arange(0, self.X)
-        self.coly = np.arange(0, self.Y)
-        self.colp = torch.tensor(self.colp)
-        self.colx = torch.tensor(self.colx)
-        self.coly = torch.tensor(self.coly)
-
+        
     def create_obstacle(self):
-        y, x = np.meshgrid(np.arange(self.Y - 1, -1, -1), np.arange(0, self.X), indexing='ij')
-        # Obstacle
-        Obs = ((x - self.CXR)**2 + (y - self.CYR)**2) < self.R**2
-        # Forming the obstacle in x and y
-        Obs[:, np.sum(Obs, axis=0) < 2] = 0
-        Obs[np.sum(Obs, axis=1) < 2, :] = 0
+        # Use torch.meshgrid directly (no NumPy)
+        y, x = torch.meshgrid(torch.arange(self.Y - 1, -1, -1, device=self.device),
+                            torch.arange(0, self.X, device=self.device), indexing='ij')
 
-        # Convert to PyTorch tensor and boolean
-        self.Obs = torch.tensor(Obs, dtype=torch.bool, device=self.device)
-        del Obs, x, y
+        # Obstacle calculation (using PyTorch)
+        Obs = ((x - self.CXR)**2 + (y - self.CYR)**2) < self.R**2
+
+        # Forming the obstacle in x and y (using torch.sum)
+        col_sum = torch.sum(Obs, dim=0)
+        row_sum = torch.sum(Obs, dim=1)
+
+        Obs[:, col_sum < 2] = False
+        Obs[row_sum < 2, :] = False
+
+        # Ensure the array is a boolean tensor
+        self.Obs = Obs.bool()
+
+        self.colp = torch.arange(1, self.Y - 1, device=self.device)
+        self.colx = torch.arange(self.X, device=self.device)
+        self.coly = torch.arange(self.Y, device=self.device)
 
     def dot_prod(self, ux, uy):
         return ux**2 + uy**2
@@ -147,9 +148,9 @@ class Cylinder_base(nn.Module):
         return w    
 
     def get_local_Mach(self, ux, uy, T):
-        uu = torch.sqrt(self.dot_prod(ux, uy))
-        cs = torch.sqrt(self.vuy * T)
-        return uu / cs
+        uu = self.dot_prod(ux, uy)
+        cs = self.vuy * T
+        return torch.sqrt(uu / cs)
 
     
     def get_relaxation_time(self, rho, T, F, Feq):
@@ -176,8 +177,8 @@ class Cylinder_base(nn.Module):
         Feq_Obs = F_pop_torch.compute_Feq_obstacle(rho, ux, self.Uax, uy, self.Uay, T, obstacle=self.Obs)
         return Feq_Obs
     
-    def get_Feq_boundary(self, rho, ux, uy, T):
-        Feq_BC = F_pop_torch.compute_Feq_boundary(rho, ux, self.Uax, uy, self.Uay, T, self.coly, 0)        
+    def get_Feq_BC(self, rho, ux, uy, T):
+        Feq_BC = F_pop_torch.compute_Feq_BC(rho, ux, self.Uax, uy, self.Uay, T, self.coly, 0)        
         return Feq_BC
     
     def get_Geq_Newton_solver(self, rho, ux, uy, T, khi, zetax, zetay):
@@ -198,7 +199,7 @@ class Cylinder_base(nn.Module):
                                                 khi, zetax, zetay
                                             ) 
         # Convert back to torch tensors
-        Geq = torch.tensor(Geq_np, device=self.device)
+        Geq = torch.tensor(Geq_np, dtype=torch.float32,  device=self.device)
         return Geq, khi, zetax, zetay
     
     def get_Geq_Newton_solver_obs(self, rho, ux, uy, T, khi, zetax, zetay):
@@ -217,10 +218,11 @@ class Cylinder_base(nn.Module):
                                                     ux_np, uy_np,
                                                     T_np, rho_np,
                                                     self.Cv, self.Qn,
-                                                    khi, zetax, zetay, self.Obs
+                                                    khi, zetax, zetay, detach(self.Obs)
                                                     ) 
         # Convert back to torch tensors
-        Geq_obs = torch.tensor(Geq_np, device=self.device)
+        Geq_obs = torch.tensor(Geq_np,  dtype=torch.float32, 
+                               device=self.device)
         return Geq_obs, khi, zetax, zetay
     
     def get_Geq_Newton_solver_BC(self, rho, ux, uy, T, khi, zetax, zetay):
@@ -239,19 +241,29 @@ class Cylinder_base(nn.Module):
                                                     ux_np, uy_np,
                                                     T_np, rho_np,
                                                     self.Cv, self.Qn,
-                                                    khi, zetax, zetay, self.coly, 0
+                                                    khi, zetax, zetay, detach(self.coly), 0
                                                     ) 
         # Convert back to torch tensors
-        Geq_BC = torch.tensor(Geq_np, device=self.device)
+        Geq_BC = torch.tensor(Geq_np, dtype=torch.float32, 
+                              device=self.device)
         return Geq_BC, khi, zetax, zetay
 
 
     def get_obs_distribution(self, ux, uy, T, rho, khi, zetax, zetay):
         # Obstacle distribution
-        ux_obs = torch.where(self.Obs, torch.zeros_like(ux), ux)
-        uy_obs = torch.where(self.Obs, torch.zeros_like(uy), uy)
-        T_obs = torch.where(self.Obs, torch.full_like(T, self.T0), T)
-        rho_obs = torch.where(self.Obs, torch.ones_like(rho), rho)
+        #ux_obs = torch.where(self.Obs,0, ux)
+        #uy_obs = torch.where(self.Obs, 0, uy)
+        #T_obs = torch.where(self.Obs,  self.T0, T)
+        #rho_obs = torch.where(self.Obs, 1, rho)  
+        ux_obs = ux.clone()
+        uy_obs = uy.clone()
+        T_obs = T.clone()
+        rho_obs = rho.clone()
+        ux_obs[self.Obs] = 0.
+        uy_obs[self.Obs] = 0.
+        T_obs[self.Obs] = self.T0
+        rho_obs[self.Obs] = 1.
+              
         
         Fi_obs_cyl = self.get_Feq_obs(rho, ux, uy, T)
 
@@ -262,14 +274,15 @@ class Cylinder_base(nn.Module):
                                                             khi,
                                                             zetax,
                                                             zetay)                                                                                  
+  
         # Inlet
-        inlet_mask = self.coly[:, 0]  # Create a mask for inlet cells
-        ux_obs = torch.where(inlet_mask, torch.full_like(ux, self.U0), ux)
-        uy_obs = torch.where(inlet_mask, torch.zeros_like(uy), uy)
-        T_obs = torch.where(inlet_mask, torch.full_like(T, self.T0), T)
-        rho_obs = torch.where(inlet_mask, torch.full_like(rho, self.rho0), rho)
+        ux_obs[self.coly, 0] = self.U0
+        uy_obs[self.coly, 0] = 0
+        T_obs[self.coly, 0] = self.T0
+        rho_obs[self.coly, 0] = self.rho0
 
-        Fi_obs_Inlet = self.get_Feq_boundary(rho_obs, ux_obs, uy_obs, T_obs)
+
+        Fi_obs_Inlet = self.get_Feq_BC(rho_obs, ux_obs, uy_obs, T_obs)
         Gi_obs_Inlet, _, _, _ = self.get_Geq_Newton_solver_BC(rho_obs,
                                                             ux_obs,
                                                             uy_obs,
@@ -279,8 +292,8 @@ class Cylinder_base(nn.Module):
                                                             zetay)
   
 
-        Gi_obs_Inlet = torch.tensor(Gi_obs_Inlet, device=self.device, dtype=torch.float)
-        Gi_obs_cyl = torch.tensor(Gi_obs_cyl, device=self.device, dtype=torch.float)
+        Gi_obs_Inlet = Gi_obs_Inlet.to(self.device) 
+        Gi_obs_cyl = Gi_obs_cyl.to(self.device)
 
         return Fi_obs_cyl, Gi_obs_cyl, Fi_obs_Inlet, Gi_obs_Inlet
     
@@ -347,23 +360,18 @@ class Cylinder_base(nn.Module):
         Gi = G[q_indices, Y_indices, X_indices]
         return Fi, Gi
     
+    
     def streaming(self, F_pos_coll, G_pos_coll):
         Fo1, Go1 = self.interpolate_domain(F_pos_coll, G_pos_coll)
         Fi, Gi = self.shift_operator(Fo1, Go1)      
-        # boundary conditions
-        coly = torch.arange(1, self.Y + 1, device=self.device) - 1
-        Gi[:, coly, 0] = Gi[:, coly, 1]
-        Gi[:, coly, self.X - 1] = Gi[:, coly, self.X - 2]
-        Fi[:, coly, 0] = Fi[:, coly, 1]
-        Fi[:, coly, self.X - 1] = Fi[:, coly, self.X - 2]
         return Fi, Gi
     
     def initial_conditions(self):
         # Initial condition
         rho = torch.ones((self.Y, self.X))
-        ux = self.U0 * torch.ones((self.Y, self.X))
+        ux =  torch.full((self.Y, self.X), self.U0)
         uy = torch.zeros((self.Y, self.X))
-        T = self.T0 * torch.ones((self.Y, self.X))
+        T = torch.full((self.Y, self.X), self.T0)
 
         khi0 = np.zeros((self.Y, self.X))
         zetax0 = np.zeros((self.Y, self.X))
@@ -377,9 +385,7 @@ class Cylinder_base(nn.Module):
                                                             T,
                                                             khi0,
                                                             zetax0, 
-                                                            zetay0)  
-
-        Gi0, khi0, zetax0, zetay0 = torch.tensor(Gi0), khi, zetax, zetay
+                                                            zetay0) 
         Fi0 = Fi0.to(self.device)
         Gi0 = Gi0.to(self.device)
         del rho, ux, uy, T, khi0, zetax0, zetay0
@@ -387,14 +393,13 @@ class Cylinder_base(nn.Module):
                                               
 
     def enforce_Obs_and_BC(self, Fi, Gi, Fi_obs_cyl, Gi_obs_cyl, Fi_obs_Inlet, Gi_obs_Inlet):
-        """Enforces obstacle and boundary conditions with maximum efficiency."""
 
         Fi_obs = Fi.clone()
         Gi_obs = Gi.clone()
 
         # Obstacle
-        Fi_obs[:, self.obs] = Fi_obs_cyl
-        Gi_obs[:, self.obs] = Gi_obs_cyl
+        Fi_obs[:, self.Obs] = Fi_obs_cyl
+        Gi_obs[:, self.Obs] = Gi_obs_cyl
 
         #Inlet
         Fi_obs[:, self.coly, 0] = Fi_obs_Inlet
@@ -421,6 +426,7 @@ def main():
     import h5py
     import yaml
     from utilities import plot_simulation_results
+    import matplotlib.pyplot as plt
     parser = argparse.ArgumentParser()
     parser.add_argument('--device', type=int, default=3,
                         help='Choose the device index (0 for cpu, 1 for cuda:1, 2 for cuda:2, 3 for cuda:3)')
@@ -428,6 +434,7 @@ def main():
     parser.add_argument('--save', dest='save', action='store_true', help='Save file in database')
     parser.add_argument('--no-save', dest='save', action='store_false', help='Do not save file in database')
     parser.add_argument("--plot", dest='plot', action='store_true', help='Plot the results', default=False)
+    parser.add_argument("--compile", dest='compile', action='store_true', help='Compile the functions', default=False)
     parser.set_defaults(save=True)
 
     args = parser.parse_args()
@@ -441,9 +448,7 @@ def main():
     cylinder_solver = Cylinder_base(X=config['X'],
                            Y=config['Y'],
                            Qn=config['Qn'],
-                           CXR=config['CXR'],
-                           CYR=config['CYR'],
-                           R=config['R'],
+                           radius=config['radius'],
                            Ma0=config['Ma0'],
                            Re=config['Re'],
                            rho0=config['rho0'],
@@ -455,10 +460,17 @@ def main():
                            Ns=config['Ns'],
                            device=device)
     
-    cylinder_solver.collision = torch.compile(cylinder_solver.collision)
-    cylinder_solver.streaming = torch.compile(cylinder_solver.streaming)
-    cylinder_solver.shift_operator = torch.compile(cylinder_solver.shift_operator)
-    cylinder_solver.get_macroscopic = torch.compile(cylinder_solver.get_macroscopic)
+    plt.imshow(detach(cylinder_solver.Obs), cmap='gray',  vmin=0, vmax=1)
+    plt.savefig(f'images/obstacle.png')
+    plt.close()
+    
+    if args.compile:    
+        cylinder_solver.collision = torch.compile(cylinder_solver.collision, dynamic=True, fullgraph=False)
+        cylinder_solver.streaming = torch.compile(cylinder_solver.streaming, dynamic=True, fullgraph=False)
+        cylinder_solver.shift_operator = torch.compile(cylinder_solver.shift_operator, dynamic=True, fullgraph=False)
+        cylinder_solver.get_macroscopic = torch.compile(cylinder_solver.get_macroscopic, dynamic=True, fullgraph=False)
+        cylinder_solver.get_Feq = torch.compile(cylinder_solver.get_Feq, dynamic=True, fullgraph=False) 
+        cylinder_solver.enforce_Obs_and_BC = torch.compile(cylinder_solver.enforce_Obs_and_BC, dynamic=True, fullgraph=False)
     
     Fi0, Gi0, khi0, zetax0, zetay0 = cylinder_solver.initial_conditions()
 
@@ -528,10 +540,12 @@ def main():
             zetax0 = zetax
             zetay0 = zetay
 
-            if args.plot and (i % 100 == 0):
+            if args.plot and (i % 50 == 0):
                 Ma = cylinder_solver.get_local_Mach(ux, uy, T)
-                plot_simulation_results(Ma, Ma_GT, i)
-                print("to plot")
+                plot_simulation_results(detach(Ma), i)
+                
+                
+
 
         if args.save:
             os.makedirs('data_base', exist_ok=True)

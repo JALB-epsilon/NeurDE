@@ -138,7 +138,8 @@ class SODSolver(nn.Module):
                                                 khi, zetax, zetay
                                             ) 
         # Convert back to torch tensors
-        Geq = torch.tensor(Geq_np, device=self.device)
+        Geq = torch.tensor(Geq_np, dtype=torch.float32,
+                           device=self.device)
         return Geq, khi, zetax, zetay
     
     def get_maxwellian_pressure_tensor(self, rho, ux, uy, T):

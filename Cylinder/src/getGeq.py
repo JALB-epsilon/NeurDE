@@ -74,20 +74,20 @@ def levermore_Geq(ex, ey, ux, uy, T, rho, Cv, Qn, khi, zetax, zetay):
 
 
 def levermore_Geq_BCs(ex, ey, ux, uy, T, rho, Cv, Qn, khi, zetax, zetay, row, col):
-    ux[np.abs(ux)<1e-5] = 0
-    uy[np.abs(uy)<1e-5] = 0
-    T[np.abs(T)<1e-5] = 0
-    rho[np.abs(rho)<1e-5] = 0
+    """Calculates Levermore equilibrium for boundary conditions (similar to the well-tested version)."""
+    ux[np.abs(ux) < 1e-6] = 0
+    uy[np.abs(uy) < 1e-6] = 0
+    T[np.abs(T) < 1e-6] = 0
+    rho[np.abs(rho) < 1e-6] = 0
     eps=1e-12
-    Y,X = ux.shape
+    Y, X = ux.shape
     Qn = int(Qn)
     ONE9 = np.ones((1,Qn))
     ex = ex.squeeze()
     ey = ey.squeeze()
-    ONE9 = np.ones(Qn, order='F')
 
     uu = ux**2 + uy**2
-    E = T*Cv + uu/2
+    E = T * Cv + 0.5 * uu  # Corrected: 0.5 * uu
     H = E + T
 
     w = np.zeros((Qn, Y,X), order='F')
@@ -137,7 +137,7 @@ def levermore_Geq_BCs(ex, ey, ux, uy, T, rho, Cv, Qn, khi, zetax, zetay, row, co
         zetay1 = zetay.copy()
 
         # newton Method to find root
-        khi[row,col] = khi[row,col] -(IJ[0, 0] * F[0] + IJ[0, 1] * F[1] + IJ[0, 2] * F[2])         # remove reshape in Tran's code becasue of automatic broadcasting in numpy
+        khi[row,col] = khi[row,col] -(IJ[0, 0] * F[0] + IJ[0, 1] * F[1] + IJ[0, 2] * F[2])        
         zetax[row,col] =zetax[row,col]- (IJ[1, 0] * F[0] + IJ[1, 1] * F[1] + IJ[1, 2] * F[2])
         zetay[row,col] =zetay[row,col]- (IJ[2, 0] * F[0] + IJ[2, 1] * F[1] + IJ[2, 2] * F[2]) 
         
@@ -159,31 +159,28 @@ def levermore_Geq_BCs(ex, ey, ux, uy, T, rho, Cv, Qn, khi, zetax, zetay, row, co
     
     return Feq,khi,zetax,zetay
 
-def levermore_Geq_Obs (ex, ey, ux, uy, T, rho, Cv, Qn, khi, zetax, zetay, Obs):
-    ux[np.abs(ux)<1e-5] = 0
-    uy[np.abs(uy)<1e-5] = 0
-    T[np.abs(T)<1e-5] = 0
-    rho[np.abs(rho)<1e-5] = 0
 
+
+def levermore_Geq_Obs(ex, ey, ux, uy, T, rho, Cv, Qn, khi, zetax, zetay, Obs):
+    """Calculates Levermore equilibrium for observed points (similar to the well-tested version)."""
+    ux[np.abs(ux) < 1e-6] = 0
+    uy[np.abs(uy) < 1e-6] = 0
+    T[np.abs(T) < 1e-6] = 0
+    rho[np.abs(rho) < 1e-6] = 0
+    eps = 1e-12
     ex = ex.squeeze()
     ey = ey.squeeze()
-    eps=1e-12
+    Qn = int(Qn)
 
     uu = ux[Obs]**2 + uy[Obs]**2
-    E = T[Obs]*Cv + uu/2
+    E = T[Obs] * Cv + 0.5 * uu  # Corrected: 0.5 * uu
     H = E + T[Obs]
     L = np.arange(len(uu))
 
-    w = np.zeros((9, len(L)), order='F')
-    w[0,L] = (1-T[Obs])*T[Obs]/2
-    w[1,L] = (1-T[Obs])*T[Obs]/2
-    w[2,L] = (1-T[Obs])*T[Obs]/2
-    w[3,L] = (1-T[Obs])*T[Obs]/2
-    w[4,L] = T[Obs]**2/4
-    w[5,L] = T[Obs]**2/4
-    w[6,L] = T[Obs]**2/4
-    w[7,L] = T[Obs]**2/4
-    w[8,L] = (1-T[Obs])**2
+    w = np.zeros((Qn,len(L)))  # Qn rows, number of observed points columns
+    w[:4, :] = (1 - T[Obs]) * T[Obs] * 0.5  # Vectorized
+    w[4:8, :] = T[Obs]**2 * 0.25  # Vectorized
+    w[8, :] = (1 - T[Obs])**2  # Vectorized
 
     dkhi = np.zeros_like(khi, order='F')
     dzetax = np.zeros_like(zetax, order='F')

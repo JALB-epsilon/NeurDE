@@ -11,12 +11,12 @@ class F_pop_torch(nn.Module):
         ux_diff_sq = ux_diff**2
         uy_diff_sq = uy_diff**2
         return {
-            "mx": (-ux_diff + ux_diff_sq + T) / 2,
-            "my": (-uy_diff + uy_diff_sq + T) / 2,
+            "mx": (-ux_diff + ux_diff_sq + T) *0.5,
+            "my": (-uy_diff + uy_diff_sq + T)  *0.5,
             "0x": 1 - (ux_diff_sq + T),
             "0y": 1 - (uy_diff_sq + T),
-            "px": (ux_diff + ux_diff_sq + T) / 2,
-            "py": (uy_diff + uy_diff_sq + T) / 2,
+            "px": (ux_diff + ux_diff_sq + T)  *0.5,
+            "py": (uy_diff + uy_diff_sq + T)  *0.5,
         }
 
     @staticmethod
