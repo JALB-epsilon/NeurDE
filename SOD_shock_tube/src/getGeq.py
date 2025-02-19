@@ -3,10 +3,10 @@ from .multinv import multinv
 
 def levermore_Geq(ex, ey, ux, uy, T, rho, Cv, Qn, khi, zetax, zetay):
     """Calculates the Levermore equilibrium distribution function (optimized)."""
-    ux[np.abs(ux) < 1e-5] = 0
-    uy[np.abs(uy) < 1e-5] = 0
-    T[np.abs(T) < 1e-5] = 0
-    rho[np.abs(rho) < 1e-5] = 0
+    ux[np.abs(ux) < 1e-6] = 0
+    uy[np.abs(uy) < 1e-6] = 0
+    T[np.abs(T) < 1e-6] = 0
+    rho[np.abs(rho) < 1e-6] = 0
 
     Y, X = ux.shape
     Qn = int(Qn)
@@ -28,9 +28,9 @@ def levermore_Geq(ex, ey, ux, uy, T, rho, Cv, Qn, khi, zetax, zetay):
     J = np.zeros((3, 3, Y, X))
 
     for _ in range(20):
-        khi[np.abs(khi) < 1e-5] = 0
-        zetax[np.abs(zetax) < 1e-5] = 0
-        zetay[np.abs(zetay) < 1e-5] = 0
+        khi[np.abs(khi) < 1e-6] = 0
+        zetax[np.abs(zetax) < 1e-6] = 0
+        zetay[np.abs(zetay) < 1e-6] = 0
 
         f = w * np.exp(khi[None, :, :] + zetax[None, :, :] * ex[:, None, None] + zetay[None, :, :] * ey[:, None, None])
 

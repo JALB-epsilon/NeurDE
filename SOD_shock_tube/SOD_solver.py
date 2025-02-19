@@ -88,6 +88,7 @@ class SODSolver(nn.Module):
         ux = rho_ux * inv_rho
         uy = rho_uy * inv_rho
         E = self.get_energy_density(G)*0.5*inv_rho
+        del inv_rho, rho_ux, rho_uy
         return rho, ux, uy, E
     
     def get_w(self, T):
@@ -153,6 +154,7 @@ class SODSolver(nn.Module):
         P_xx = torch.tensordot(self.ex2, F, dims=([0], [0])).to(self.device)
         P_yy = torch.tensordot(self.ey2, F, dims=([0], [0])).to(self.device)
         P_xy = torch.tensordot(self.exey, F, dims=([0], [0])).to(self.device)
+        del F
         return P_xx, P_yy, P_xy
     
     def get_pressure(self, T, rho):
@@ -165,12 +167,14 @@ class SODSolver(nn.Module):
         diff_xy = P_xy - P_eqxy
         qsx = 2 * ux * (P_xx - P_eqxx) + 2 * uy * diff_xy 
         qsy = 2 * uy * (P_yy - P_eqyy) + 2 * ux * diff_xy 
+        del P_eqxx, P_eqyy, P_eqxy, P_xx, P_yy, P_xy, diff_xy
         return qsx, qsy 
     
     def from_macro_to_lattice_Gis(self,F, rho, ux, uy, T):
         w = self.get_w(T)
         qsx, qsy = self.get_qs(F, rho, ux, uy, T)
         Gis = w * (qsx * self.ex[:, None, None] + qsy * self.ey[:, None, None]) / T[None, :, :]
+        del w, qsx, qsy
         return Gis
     
     def interpolate_domain(self, Fo, Go):
@@ -182,6 +186,7 @@ class SODSolver(nn.Module):
         Go1[:, :, 1:self.X] = Go[:, :, 1:self.X] * (1 - self.Uax) + Go[:, :, 0:self.X - 1] * self.Uax
         Fo1[:, :, 0] = (Fo[:, :, 1] * self.Uax + Fo[:, :, 0] * (1 + self.Uax)) / div
         Go1[:, :, 0] = (Go[:, :, 1] * self.Uax + Go[:, :, 0] * (1 + self.Uax)) / div
+        del div
         return Fo1, Go1
                
     def collision(self, F, G, Feq, Geq, rho, ux, uy, T ):
@@ -189,6 +194,7 @@ class SODSolver(nn.Module):
         Gis = self.from_macro_to_lattice_Gis(F, rho, ux, uy, T)
         F_pos_collision = F - omega * (F - Feq)
         G_pos_collision = G - omega * (G - Geq) + (omega - omegaT) * Gis
+        del omega, omegaT, Gis
         return F_pos_collision, G_pos_collision
     
     def shift_operator(self, F, G):
@@ -201,6 +207,7 @@ class SODSolver(nn.Module):
 
         Fi = F[q_indices, Y_indices, X_indices]
         Gi = G[q_indices, Y_indices, X_indices]
+        del q_indices, Y_indices, X_indices
         return Fi, Gi
     
     def streaming(self, F_pos_coll, G_pos_coll):
@@ -212,6 +219,7 @@ class SODSolver(nn.Module):
         Gi[:, coly, self.X - 1] = Gi[:, coly, self.X - 2]
         Fi[:, coly, 0] = Fi[:, coly, 1]
         Fi[:, coly, self.X - 1] = Fi[:, coly, self.X - 2]
+        del Fo1, Go1
         return Fi, Gi
     
     def case_1_initial_conditions(self):
@@ -230,6 +238,7 @@ class SODSolver(nn.Module):
         Gi0, khi, zetax, zetay = self.get_Geq_Newton_solver(rho0, ux0, uy0, T0, khi0, zetax0, zetay0) # G_i population                                     
         Fi0 =Fi0.to(self.device)
         Gi0 = Gi0.to(self.device)
+        del T0
         return Fi0, Gi0, khi, zetax, zetay
     
     def case_2_initial_conditions(self):
@@ -251,6 +260,7 @@ class SODSolver(nn.Module):
         Gi0, khi, zetax, zetay = self.get_Geq_Newton_solver(rho0, ux0, uy0, T0, khi0, zetax0, zetay0) # G_i population
         Fi0 = Fi0.to(self.device)
         Gi0 = Gi0.to(self.device)
+        del P0
         return Fi0, Gi0, khi, zetax, zetay
     
 
@@ -269,6 +279,7 @@ def main():
     parser.add_argument('--no-save', dest='save', action='store_false', help='Do not save file in database')
     parser.add_argument('--case', type=int, choices=[1, 2], help='Choose case 1 or 2', default=1)
     parser.add_argument("--plot", dest='plot', action='store_true', help='Plot the results', default=False)
+    parser.add_argument("--compile", dest='compile', action='store_true', help='Compile the functions', default=False)
     parser.set_defaults(save=True)
 
 
@@ -298,11 +309,13 @@ def main():
                             )  
     
 
-    sod_solver.collision = torch.compile(sod_solver.collision)
-    sod_solver.streaming = torch.compile(sod_solver.streaming)  
-    sod_solver.shift_operator = torch.compile(sod_solver.shift_operator)
-    sod_solver.get_macroscopic = torch.compile(sod_solver.get_macroscopic)
-    sod_solver.get_Feq = torch.compile(sod_solver.get_Feq)
+    if args.compile:
+        print("Compiling some of the functions")
+        sod_solver.collision = torch.compile(sod_solver.collision, dynamic=True, fullgraph=False)
+        sod_solver.streaming = torch.compile(sod_solver.streaming, dynamic=True,  fullgraph=False)  
+        sod_solver.shift_operator = torch.compile(sod_solver.shift_operator,  dynamic=True, fullgraph=False)
+        sod_solver.get_macroscopic = torch.compile(sod_solver.get_macroscopic, dynamic=True, fullgraph=False)
+        sod_solver.get_Feq = torch.compile(sod_solver.get_Feq,  dynamic=True,  fullgraph=False)
 
 
     initial_conditions_func = getattr(sod_solver, case_params['initial_conditions_func'])

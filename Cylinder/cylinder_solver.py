@@ -1,48 +1,63 @@
 import torch.nn as nn
-import torch       
+import torch     
+import numpy as np  
+from src import *
+from utilities import detach, get_device
 
 class Cylinder_base(nn.Module):
     def __init__(self,
-                 X=500,
-                 Y=300,
-                 Qn=9,
-                 CXR=None,
-                 CYR=None,
-                 R=20,
-                 Ma0=1.7,
-                 Re=300,
-                 ALPHA=0,
-                 alpha1=1.35,
-                 alpha01=1.05,
-                 vuy=1.4,
-                 Pr=0.71,
-                 Uax=None,
-                 Uay=0,
-                 device='cuda'):
+                X=500,
+                Y=300,
+                Qn=9,
+                CXR=None,
+                CYR=None,
+                R=20,
+                Ma0=1.7,
+                Re=300,
+                rho0=1,
+                T0=0.2,
+                alpha1=1.35,
+                alpha01=1.05,
+                vuy=1.4,
+                Pr=0.71,
+                Ns=0.6,
+                device='cuda'):
         super(Cylinder_base, self).__init__()
         self.X = X
         self.Y = Y
         if CXR or CYR is None:
             self.CXR = round(self.X / 3)-1  # center in x for the circular cylinder
-            self.CYR = round(self.Y / 2)-1  # center in y for the circular cylinder
+            self.CYR = round(self.Y / 2)-1  # center in y for the circular cylinder        
         self.Qn = Qn
         self.alpha1 = alpha1
         self.alpha01 = alpha01
         self.vuy = vuy
         self.Pr = Pr
         self.R = R #radius
-        self.Uax = Uax
-        self.Uay = Uay
+        self.rho0 = rho0
+        self.T0 = T0
+        self.Ns = Ns
+        self.Ma0 = Ma0
+        self.Re = Re
         self.device = device
         ex_values = [1, 0, -1, 0, 1, -1, -1, 1, 0]
         ey_values = [0, 1, 0, -1, 1, 1, -1, -1, 0]
+        self.get_shift_constants()
         self.ex = torch.tensor(ex_values, dtype=torch.float32, device=self.device) + self.Uax
         self.ey = torch.tensor(ey_values, dtype=torch.float32, device=self.device) + self.Uay
         self.ex1 = torch.tensor(ex_values, dtype=torch.float32, device=self.device)
         self.ey1 = torch.tensor(ey_values, dtype=torch.float32, device=self.device)
         del ex_values, ey_values
-        self.Lx = self.X // 2
         self.get_derived_quantities()
+        self.Lx = self.X // 2
+        self.create_obstacle()
+
+    def get_shift_constants(self):
+        self.cs0 = np.sqrt(self.vuy*self.T0) # speed of sound
+        self.U0 = self.Ma0 * self.cs0 #far field velocity
+        #defining the shift
+        self.Uax = self.U0*self.Ns
+        self.Uay = 0
 
     def get_derived_quantities(self): 
         self.iCv = self.vuy - 1 
@@ -53,8 +68,32 @@ class Cylinder_base(nn.Module):
         self.ey2 = self.ey**2
         self.exey = self.ex * self.ey
         self.R = self.Cp-self.Cv  #gas constant
+        
         self.shifts_y = -self.ey1.int()
         self.shifts_x = self.ex1.int()
+
+        self.muy = self.U0 * 2*self.R / self.Re # dynamic viscosity
+
+
+        # Create the column vectors for BCs
+        self.colp = np.arange(1, self.Y-1)
+        self.colx = np.arange(0, self.X)
+        self.coly = np.arange(0, self.Y)
+        self.colp = torch.tensor(self.colp)
+        self.colx = torch.tensor(self.colx)
+        self.coly = torch.tensor(self.coly)
+
+    def create_obstacle(self):
+        y, x = np.meshgrid(np.arange(self.Y - 1, -1, -1), np.arange(0, self.X), indexing='ij')
+        # Obstacle
+        Obs = ((x - self.CXR)**2 + (y - self.CYR)**2) < self.R**2
+        # Forming the obstacle in x and y
+        Obs[:, np.sum(Obs, axis=0) < 2] = 0
+        Obs[np.sum(Obs, axis=1) < 2, :] = 0
+
+        # Convert to PyTorch tensor and boolean
+        self.Obs = torch.tensor(Obs, dtype=torch.bool, device=self.device)
+        del Obs, x, y
 
     def dot_prod(self, ux, uy):
         return ux**2 + uy**2
@@ -95,6 +134,7 @@ class Cylinder_base(nn.Module):
         ux = rho_ux * inv_rho
         uy = rho_uy * inv_rho
         E = self.get_energy_density(G)*0.5*inv_rho
+        del inv_rho, rho_ux, rho_uy
         return rho, ux, uy, E
     
     def get_w(self, T):
@@ -105,6 +145,12 @@ class Cylinder_base(nn.Module):
         w[8, :, :] = one_minus_T**2
         del one_minus_T
         return w    
+
+    def get_local_Mach(self, ux, uy, T):
+        uu = torch.sqrt(self.dot_prod(ux, uy))
+        cs = torch.sqrt(self.vuy * T)
+        return uu / cs
+
     
     def get_relaxation_time(self, rho, T, F, Feq):
         tau_DL = self.muy / (rho * T) + 0.5
@@ -121,10 +167,18 @@ class Cylinder_base(nn.Module):
         omega = 1 / tau
         omegaT = 1 / tauT
         return omega, omegaT
-    
+   
     def get_Feq(self, rho, ux, uy, T):
-        Feq = F_pop_torch.compute_Feq(rho, ux, self.Uax, uy, self.Uay, T, Q=self.Qn)
+        Feq = F_pop_torch.compute_Feq(rho, ux, self.Uax, uy, self.Uay, T)
         return Feq
+    
+    def get_Feq_obs(self, rho, ux, uy, T):
+        Feq_Obs = F_pop_torch.compute_Feq_obstacle(rho, ux, self.Uax, uy, self.Uay, T, obstacle=self.Obs)
+        return Feq_Obs
+    
+    def get_Feq_boundary(self, rho, ux, uy, T):
+        Feq_BC = F_pop_torch.compute_Feq_boundary(rho, ux, self.Uax, uy, self.Uay, T, self.coly, 0)        
+        return Feq_BC
     
     def get_Geq_Newton_solver(self, rho, ux, uy, T, khi, zetax, zetay):
         # Convert tensors to numpy arrays
@@ -146,6 +200,89 @@ class Cylinder_base(nn.Module):
         # Convert back to torch tensors
         Geq = torch.tensor(Geq_np, device=self.device)
         return Geq, khi, zetax, zetay
+    
+    def get_Geq_Newton_solver_obs(self, rho, ux, uy, T, khi, zetax, zetay):
+        # Convert tensors to numpy arrays
+        rho_np = detach(rho) if not isinstance(rho, np.ndarray) else rho
+        ux_np = detach(ux) if not isinstance(ux, np.ndarray) else ux
+        uy_np = detach(uy) if not isinstance(uy, np.ndarray) else uy
+        T_np = detach(T) if not isinstance(T, np.ndarray) else T
+        khi = detach(khi) if not isinstance(khi, np.ndarray) else khi
+        zetax = detach(zetax) if not isinstance(zetax, np.ndarray) else zetax
+        zetay = detach(zetay) if not isinstance(zetay, np.ndarray) else zetay 
+        # Compute Geq, khi, zetax, zetay using levermore_Geq
+        Geq_np, khi, zetax, zetay = levermore_Geq_Obs(
+                                                    detach(self.ex), 
+                                                    detach(self.ey),
+                                                    ux_np, uy_np,
+                                                    T_np, rho_np,
+                                                    self.Cv, self.Qn,
+                                                    khi, zetax, zetay, self.Obs
+                                                    ) 
+        # Convert back to torch tensors
+        Geq_obs = torch.tensor(Geq_np, device=self.device)
+        return Geq_obs, khi, zetax, zetay
+    
+    def get_Geq_Newton_solver_BC(self, rho, ux, uy, T, khi, zetax, zetay):
+        # Convert tensors to numpy arrays
+        rho_np = detach(rho) if not isinstance(rho, np.ndarray) else rho
+        ux_np = detach(ux) if not isinstance(ux, np.ndarray) else ux
+        uy_np = detach(uy) if not isinstance(uy, np.ndarray) else uy
+        T_np = detach(T) if not isinstance(T, np.ndarray) else T
+        khi = detach(khi) if not isinstance(khi, np.ndarray) else khi
+        zetax = detach(zetax) if not isinstance(zetax, np.ndarray) else zetax
+        zetay = detach(zetay) if not isinstance(zetay, np.ndarray) else zetay 
+        # Compute Geq, khi, zetax, zetay using levermore_Geq
+        Geq_np, khi, zetax, zetay = levermore_Geq_BCs(
+                                                    detach(self.ex), 
+                                                    detach(self.ey),
+                                                    ux_np, uy_np,
+                                                    T_np, rho_np,
+                                                    self.Cv, self.Qn,
+                                                    khi, zetax, zetay, self.coly, 0
+                                                    ) 
+        # Convert back to torch tensors
+        Geq_BC = torch.tensor(Geq_np, device=self.device)
+        return Geq_BC, khi, zetax, zetay
+
+
+    def get_obs_distribution(self, ux, uy, T, rho, khi, zetax, zetay):
+        # Obstacle distribution
+        ux_obs = torch.where(self.Obs, torch.zeros_like(ux), ux)
+        uy_obs = torch.where(self.Obs, torch.zeros_like(uy), uy)
+        T_obs = torch.where(self.Obs, torch.full_like(T, self.T0), T)
+        rho_obs = torch.where(self.Obs, torch.ones_like(rho), rho)
+        
+        Fi_obs_cyl = self.get_Feq_obs(rho, ux, uy, T)
+
+        Gi_obs_cyl, _, _, _ = self.get_Geq_Newton_solver_obs(rho,
+                                                            ux,
+                                                            uy,
+                                                            T,
+                                                            khi,
+                                                            zetax,
+                                                            zetay)                                                                                  
+        # Inlet
+        inlet_mask = self.coly[:, 0]  # Create a mask for inlet cells
+        ux_obs = torch.where(inlet_mask, torch.full_like(ux, self.U0), ux)
+        uy_obs = torch.where(inlet_mask, torch.zeros_like(uy), uy)
+        T_obs = torch.where(inlet_mask, torch.full_like(T, self.T0), T)
+        rho_obs = torch.where(inlet_mask, torch.full_like(rho, self.rho0), rho)
+
+        Fi_obs_Inlet = self.get_Feq_boundary(rho_obs, ux_obs, uy_obs, T_obs)
+        Gi_obs_Inlet, _, _, _ = self.get_Geq_Newton_solver_BC(rho_obs,
+                                                            ux_obs,
+                                                            uy_obs,
+                                                            T_obs,
+                                                            khi,
+                                                            zetax,
+                                                            zetay)
+  
+
+        Gi_obs_Inlet = torch.tensor(Gi_obs_Inlet, device=self.device, dtype=torch.float)
+        Gi_obs_cyl = torch.tensor(Gi_obs_cyl, device=self.device, dtype=torch.float)
+
+        return Fi_obs_cyl, Gi_obs_cyl, Fi_obs_Inlet, Gi_obs_Inlet
     
     def get_maxwellian_pressure_tensor(self, rho, ux, uy, T):
         momentumx = rho * ux
@@ -220,3 +357,198 @@ class Cylinder_base(nn.Module):
         Fi[:, coly, 0] = Fi[:, coly, 1]
         Fi[:, coly, self.X - 1] = Fi[:, coly, self.X - 2]
         return Fi, Gi
+    
+    def initial_conditions(self):
+        # Initial condition
+        rho = torch.ones((self.Y, self.X))
+        ux = self.U0 * torch.ones((self.Y, self.X))
+        uy = torch.zeros((self.Y, self.X))
+        T = self.T0 * torch.ones((self.Y, self.X))
+
+        khi0 = np.zeros((self.Y, self.X))
+        zetax0 = np.zeros((self.Y, self.X))
+        zetay0 = np.zeros((self.Y, self.X))
+
+        Fi0 = self.get_Feq(rho, ux, uy, T)
+ 
+        Gi0, khi, zetax, zetay = self.get_Geq_Newton_solver(rho,
+                                                            ux, 
+                                                            uy, 
+                                                            T,
+                                                            khi0,
+                                                            zetax0, 
+                                                            zetay0)  
+
+        Gi0, khi0, zetax0, zetay0 = torch.tensor(Gi0), khi, zetax, zetay
+        Fi0 = Fi0.to(self.device)
+        Gi0 = Gi0.to(self.device)
+        del rho, ux, uy, T, khi0, zetax0, zetay0
+        return Fi0, Gi0, khi, zetax, zetay
+                                              
+
+    def enforce_Obs_and_BC(self, Fi, Gi, Fi_obs_cyl, Gi_obs_cyl, Fi_obs_Inlet, Gi_obs_Inlet):
+        """Enforces obstacle and boundary conditions with maximum efficiency."""
+
+        Fi_obs = Fi.clone()
+        Gi_obs = Gi.clone()
+
+        # Obstacle
+        Fi_obs[:, self.obs] = Fi_obs_cyl
+        Gi_obs[:, self.obs] = Gi_obs_cyl
+
+        #Inlet
+        Fi_obs[:, self.coly, 0] = Fi_obs_Inlet
+        Gi_obs[:, self.coly, 0] = Gi_obs_Inlet
+
+        # Outlet
+        Fi_obs[:, self.coly, self.X-1] = Fi_obs[:, self.coly, self.X-2]
+        Gi_obs[:, self.coly, self.X-1] = Gi_obs[:, self.coly, self.X-2]
+
+        # Upper wall
+        Fi_obs[:, 0, self.colx] = Fi_obs[:, 1, self.colx]
+        Gi_obs[:, 0, self.colx] = Gi_obs[:, 1, self.colx]
+
+        # Lower wall
+        Fi_obs[:, self.Y-1, self.colx] = Fi_obs[:, self.Y-2, self.colx]
+        Gi_obs[:, self.Y-1, self.colx] = Gi_obs[:, self.Y-2, self.colx]
+
+        return Fi_obs, Gi_obs
+
+def main():
+    from tqdm import tqdm
+    import argparse
+    import os
+    import h5py
+    import yaml
+    from utilities import plot_simulation_results
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--device', type=int, default=3,
+                        help='Choose the device index (0 for cpu, 1 for cuda:1, 2 for cuda:2, 3 for cuda:3)')
+    parser.add_argument('--steps', type=int, default=1000)
+    parser.add_argument('--save', dest='save', action='store_true', help='Save file in database')
+    parser.add_argument('--no-save', dest='save', action='store_false', help='Do not save file in database')
+    parser.add_argument("--plot", dest='plot', action='store_true', help='Plot the results', default=False)
+    parser.set_defaults(save=True)
+
+    args = parser.parse_args()
+    device = get_device(args.device)
+    with open ('cylinder_param.yml', 'r') as file:
+        config = yaml.safe_load(file)
+
+    config['device'] = device
+
+    print(f"Cylinder case parameters {config}")
+    cylinder_solver = Cylinder_base(X=config['X'],
+                           Y=config['Y'],
+                           Qn=config['Qn'],
+                           CXR=config['CXR'],
+                           CYR=config['CYR'],
+                           R=config['R'],
+                           Ma0=config['Ma0'],
+                           Re=config['Re'],
+                           rho0=config['rho0'],
+                           T0=config['T0'],
+                           alpha1=config['alpha1'],
+                           alpha01=config['alpha01'],
+                           vuy=config['vuy'],
+                           Pr=config['Pr'],
+                           Ns=config['Ns'],
+                           device=device)
+    
+    cylinder_solver.collision = torch.compile(cylinder_solver.collision)
+    cylinder_solver.streaming = torch.compile(cylinder_solver.streaming)
+    cylinder_solver.shift_operator = torch.compile(cylinder_solver.shift_operator)
+    cylinder_solver.get_macroscopic = torch.compile(cylinder_solver.get_macroscopic)
+    
+    Fi0, Gi0, khi0, zetax0, zetay0 = cylinder_solver.initial_conditions()
+
+    all_rho = []
+    all_ux = []
+    all_uy = []
+    all_T = []
+    all_Feq = []
+    all_Geq = []
+    all_Fi0 = []
+    all_Gi0 = []
+    all_Fi_obs_cyl = []
+    all_Gi_obs_cyl = []
+    all_Fi_obs_Inlet = []
+    all_Gi_obs_Inlet = []
+
+
+    if args.plot:
+        os.makedirs('images', exist_ok=True)
+    with torch.no_grad():  
+        for i in tqdm(range(args.steps)):
+            rho, ux, uy, E = cylinder_solver.get_macroscopic(Fi0, Gi0)
+            T = cylinder_solver.get_temp_from_energy(ux, uy, E)
+            Feq = cylinder_solver.get_Feq(rho, ux, uy, T)
+            Geq, khi, zetax, zetay = cylinder_solver.get_Geq_Newton_solver(rho,
+                                                                           ux, 
+                                                                           uy, 
+                                                                           T, 
+                                                                           khi0, 
+                                                                           zetax0, 
+                                                                           zetay0)
+            Fi0, Gi0 = cylinder_solver.collision(Fi0, Gi0, Feq, Geq, rho, ux, uy, T)
+            Fi, Gi = cylinder_solver.streaming(Fi0, Gi0)
+            Fi_obs_cyl, Gi_obs_cyl, Fi_obs_Inlet, Gi_obs_Inlet = cylinder_solver.get_obs_distribution(
+                                                                ux, 
+                                                                uy,
+                                                                T,
+                                                                rho,
+                                                                khi,
+                                                                zetax,
+                                                                zetay)
+            
+            Fi_new, Gi_new = cylinder_solver.enforce_Obs_and_BC(Fi,
+                                                                Gi,
+                                                                Fi_obs_cyl,
+                                                                Gi_obs_cyl,
+                                                                Fi_obs_Inlet,
+                                                                Gi_obs_Inlet)
+            
+            all_rho.append(detach(rho)) 
+            all_ux.append(detach(ux))
+            all_uy.append(detach(uy))
+            all_T.append(detach(T))
+            all_Feq.append(detach(Feq))
+            all_Geq.append(detach(Geq))
+            all_Fi0.append(detach(Fi0))
+            all_Gi0.append(detach(Gi0))
+            all_Fi_obs_cyl.append(detach(Fi_obs_cyl))
+            all_Gi_obs_cyl.append(detach(Gi_obs_cyl))
+            all_Fi_obs_Inlet.append(detach(Fi_obs_Inlet))
+            all_Gi_obs_Inlet.append(detach(Gi_obs_Inlet))
+    
+            # Update the distributions
+            Fi0 = Fi_new
+            Gi0 = Gi_new
+            khi0 = khi
+            zetax0 = zetax
+            zetay0 = zetay
+
+            if args.plot and (i % 100 == 0):
+                Ma = cylinder_solver.get_local_Mach(ux, uy, T)
+                plot_simulation_results(Ma, Ma_GT, i)
+                print("to plot")
+
+        if args.save:
+            os.makedirs('data_base', exist_ok=True)
+            with h5py.File(f'data_base/cylinder_case{args.case}.h5', 'w') as f:
+                f.create_dataset('rho', data=all_rho) 
+                f.create_dataset('ux', data=all_ux)  
+                f.create_dataset('uy', data=all_uy)
+                f.create_dataset('T', data=all_T)
+                f.create_dataset('Feq', data=all_Feq)
+                f.create_dataset('Geq', data=all_Geq)
+                f.create_dataset('Fi0', data=all_Fi0)
+                f.create_dataset('Gi0', data=all_Gi0) 
+                f.create_dataset('Fi_obs_cyl', data=all_Fi_obs_cyl)
+                f.create_dataset('Gi_obs_cyl', data=all_Gi_obs_cyl)
+                f.create_dataset('Fi_obs_Inlet', data=all_Fi_obs_Inlet)
+                f.create_dataset('Gi_obs_Inlet', data=all_Gi_obs_Inlet)
+
+        
+if __name__=="__main__":
+    main()       
