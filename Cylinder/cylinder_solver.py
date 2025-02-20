@@ -80,15 +80,14 @@ class Cylinder_base(nn.Module):
                             torch.arange(0, self.X, device=self.device), indexing='ij')
 
         # Obstacle calculation (using PyTorch)
-        Obs = ((x - self.CXR)**2 + (y - self.CYR)**2) < self.R**2
+        Obs = ((x - self.CXR)**2 + (y - self.CYR)**2) < self.radius**2
 
         # Forming the obstacle in x and y (using torch.sum)
         col_sum = torch.sum(Obs, dim=0)
         row_sum = torch.sum(Obs, dim=1)
 
-        Obs[:, col_sum < 2] = False
-        Obs[row_sum < 2, :] = False
-
+        Obs[:, col_sum < 2] = 0
+        Obs[row_sum < 2, :] = 0
         # Ensure the array is a boolean tensor
         self.Obs = Obs.bool()
 
@@ -443,7 +442,7 @@ def main():
         config = yaml.safe_load(file)
 
     config['device'] = device
-
+    os.makedirs('images', exist_ok=True)    
     print(f"Cylinder case parameters {config}")
     cylinder_solver = Cylinder_base(X=config['X'],
                            Y=config['Y'],
@@ -460,7 +459,7 @@ def main():
                            Ns=config['Ns'],
                            device=device)
     
-    plt.imshow(detach(cylinder_solver.Obs), cmap='gray',  vmin=0, vmax=1)
+    plt.imshow(detach(cylinder_solver.Obs), cmap='gray')
     plt.savefig(f'images/obstacle.png')
     plt.close()
     
@@ -544,12 +543,11 @@ def main():
                 Ma = cylinder_solver.get_local_Mach(ux, uy, T)
                 plot_simulation_results(detach(Ma), i)
                 
-                
-
+            
 
         if args.save:
             os.makedirs('data_base', exist_ok=True)
-            with h5py.File(f'data_base/cylinder_case{args.case}.h5', 'w') as f:
+            with h5py.File(f'data_base/cylinder_case.h5', 'w') as f:
                 f.create_dataset('rho', data=all_rho) 
                 f.create_dataset('ux', data=all_ux)  
                 f.create_dataset('uy', data=all_uy)
