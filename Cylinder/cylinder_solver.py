@@ -75,22 +75,21 @@ class Cylinder_base(nn.Module):
         # Create the column vectors for BCs
         
     def create_obstacle(self):
-        # Use torch.meshgrid directly (no NumPy)
+        # Create meshgrid directly with torch
         y, x = torch.meshgrid(torch.arange(self.Y - 1, -1, -1, device=self.device),
                             torch.arange(0, self.X, device=self.device), indexing='ij')
 
-        # Obstacle calculation (using PyTorch)
+        # Calculate the obstacle mask
         Obs = ((x - self.CXR)**2 + (y - self.CYR)**2) < self.radius**2
 
-        # Forming the obstacle in x and y (using torch.sum)
-        col_sum = torch.sum(Obs, dim=0)
-        row_sum = torch.sum(Obs, dim=1)
+        # Filter columns and rows with less than 2 True values
+        Obs[:, torch.sum(Obs, dim=0) < 2] = 0
+        Obs[torch.sum(Obs, dim=1) < 2, :] = 0
 
-        Obs[:, col_sum < 2] = 0
-        Obs[row_sum < 2, :] = 0
         # Ensure the array is a boolean tensor
         self.Obs = Obs.bool()
 
+        # Create column vectors for boundary conditions
         self.colp = torch.arange(1, self.Y - 1, device=self.device)
         self.colx = torch.arange(self.X, device=self.device)
         self.coly = torch.arange(self.Y, device=self.device)
@@ -250,26 +249,18 @@ class Cylinder_base(nn.Module):
 
     def get_obs_distribution(self, ux, uy, T, rho, khi, zetax, zetay):
         # Obstacle distribution
-        #ux_obs = torch.where(self.Obs,0, ux)
-        #uy_obs = torch.where(self.Obs, 0, uy)
-        #T_obs = torch.where(self.Obs,  self.T0, T)
-        #rho_obs = torch.where(self.Obs, 1, rho)  
-        ux_obs = ux.clone()
-        uy_obs = uy.clone()
-        T_obs = T.clone()
-        rho_obs = rho.clone()
-        ux_obs[self.Obs] = 0.
-        uy_obs[self.Obs] = 0.
-        T_obs[self.Obs] = self.T0
-        rho_obs[self.Obs] = 1.
-              
+        ux_obs = torch.where(self.Obs, torch.tensor(0.0, device=self.device), ux)
+        uy_obs = torch.where(self.Obs, torch.tensor(0.0, device=self.device), uy)
+        T_obs = torch.where(self.Obs, torch.tensor(self.T0, device=self.device), T)
+        rho_obs = torch.where(self.Obs, torch.tensor(1.0, device=self.device), rho)
+                    
         
-        Fi_obs_cyl = self.get_Feq_obs(rho, ux, uy, T)
+        Fi_obs_cyl = self.get_Feq_obs(rho_obs, ux_obs, uy_obs, T_obs)
 
-        Gi_obs_cyl, _, _, _ = self.get_Geq_Newton_solver_obs(rho,
-                                                            ux,
-                                                            uy,
-                                                            T,
+        Gi_obs_cyl, _, _, _ = self.get_Geq_Newton_solver_obs(rho_obs,
+                                                            ux_obs,
+                                                            uy_obs,
+                                                            T_obs,
                                                             khi,
                                                             zetax,
                                                             zetay)                                                                                  
@@ -444,25 +435,24 @@ def main():
     config['device'] = device
     os.makedirs('images', exist_ok=True)    
     print(f"Cylinder case parameters {config}")
-    cylinder_solver = Cylinder_base(X=config['X'],
-                           Y=config['Y'],
-                           Qn=config['Qn'],
-                           radius=config['radius'],
-                           Ma0=config['Ma0'],
-                           Re=config['Re'],
-                           rho0=config['rho0'],
-                           T0=config['T0'],
-                           alpha1=config['alpha1'],
-                           alpha01=config['alpha01'],
-                           vuy=config['vuy'],
-                           Pr=config['Pr'],
-                           Ns=config['Ns'],
-                           device=device)
+    cylinder_solver = Cylinder_base(
+                                    X=config['X'],
+                                    Y=config['Y'],
+                                    Qn=config['Qn'],
+                                    radius=config['radius'],
+                                    Ma0=config['Ma0'],
+                                    Re=config['Re'],
+                                    rho0=config['rho0'],
+                                    T0=config['T0'],
+                                    alpha1=config['alpha1'],
+                                    alpha01=config['alpha01'],
+                                    vuy=config['vuy'],
+                                    Pr=config['Pr'],
+                                    Ns=config['Ns'],
+                                    device=device
+                                    )
     
-    plt.imshow(detach(cylinder_solver.Obs), cmap='gray')
-    plt.savefig(f'images/obstacle.png')
-    plt.close()
-    
+   
     if args.compile:    
         cylinder_solver.collision = torch.compile(cylinder_solver.collision, dynamic=True, fullgraph=False)
         cylinder_solver.streaming = torch.compile(cylinder_solver.streaming, dynamic=True, fullgraph=False)
@@ -539,7 +529,7 @@ def main():
             zetax0 = zetax
             zetay0 = zetay
 
-            if args.plot and (i % 50 == 0):
+            if args.plot and (i % 15 == 0):
                 Ma = cylinder_solver.get_local_Mach(ux, uy, T)
                 plot_simulation_results(detach(Ma), i)
                 
