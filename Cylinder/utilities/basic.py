@@ -16,8 +16,6 @@ def get_device(device_index):
     return selected_device
 
 
-
-
 def plot_simulation_results(Field_GT, time_value):
     """Plots and saves Ground Truth simulation results."""
 

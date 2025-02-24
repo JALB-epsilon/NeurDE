@@ -69,7 +69,7 @@ class Cylinder_base(nn.Module):
         self.shifts_y = -self.ey1.int()
         self.shifts_x = self.ex1.int()
 
-        self.muy = self.U0 * 2*self.R / self.Re # dynamic viscosity
+        self.muy = self.U0 * 2*self.radius / self.Re # dynamic viscosity
 
 
         # Create the column vectors for BCs
@@ -190,7 +190,8 @@ class Cylinder_base(nn.Module):
         zetay = detach(zetay) if not isinstance(zetay, np.ndarray) else zetay 
         # Compute Geq, khi, zetax, zetay using levermore_Geq
         Geq_np, khi, zetax, zetay = levermore_Geq(
-                                                detach(self.ex), detach(self.ey),
+                                                detach(self.ex), 
+                                                detach(self.ey),
                                                 ux_np, uy_np,
                                                  T_np, rho_np,
                                                 self.Cv, self.Qn,
@@ -216,7 +217,8 @@ class Cylinder_base(nn.Module):
                                                     ux_np, uy_np,
                                                     T_np, rho_np,
                                                     self.Cv, self.Qn,
-                                                    khi, zetax, zetay, detach(self.Obs)
+                                                    khi, zetax, zetay, 
+                                                    detach(self.Obs)
                                                     ) 
         # Convert back to torch tensors
         Geq_obs = torch.tensor(Geq_np,  dtype=torch.float32, 
@@ -254,10 +256,18 @@ class Cylinder_base(nn.Module):
         T_obs = torch.where(self.Obs, torch.tensor(self.T0, device=self.device), T)
         rho_obs = torch.where(self.Obs, torch.tensor(1.0, device=self.device), rho)
                     
-        
+        #ux_obs = ux.clone()
+        #uy_obs = uy.clone()
+        #T_obs = T.clone()
+        #rho_obs = rho.clone()  
+        #ux_obs[self.Obs] = 0
+        #uy_obs[self.Obs] = 0
+        #T_obs[self.Obs] = self.T0
+        #rho_obs[self.Obs] = 1
+          
         Fi_obs_cyl = self.get_Feq_obs(rho_obs, ux_obs, uy_obs, T_obs)
 
-        Gi_obs_cyl, _, _, _ = self.get_Geq_Newton_solver_obs(rho_obs,
+        Gi_obs_cyl,khi_obs, zetax_obs, zetay_obs  = self.get_Geq_Newton_solver_obs(rho_obs,
                                                             ux_obs,
                                                             uy_obs,
                                                             T_obs,
@@ -277,9 +287,9 @@ class Cylinder_base(nn.Module):
                                                             ux_obs,
                                                             uy_obs,
                                                             T_obs,
-                                                            khi,
-                                                            zetax,
-                                                            zetay)
+                                                            khi_obs,
+                                                            zetax_obs,
+                                                            zetay_obs)
   
 
         Gi_obs_Inlet = Gi_obs_Inlet.to(self.device) 
@@ -407,6 +417,7 @@ class Cylinder_base(nn.Module):
         Fi_obs[:, self.Y-1, self.colx] = Fi_obs[:, self.Y-2, self.colx]
         Gi_obs[:, self.Y-1, self.colx] = Gi_obs[:, self.Y-2, self.colx]
 
+
         return Fi_obs, Gi_obs
 
 def main():
@@ -481,8 +492,18 @@ def main():
         os.makedirs('images', exist_ok=True)
     with torch.no_grad():  
         for i in tqdm(range(args.steps)):
+            all_Fi0.append(detach(Fi0))
+            all_Gi0.append(detach(Gi0))
             rho, ux, uy, E = cylinder_solver.get_macroscopic(Fi0, Gi0)
             T = cylinder_solver.get_temp_from_energy(ux, uy, E)
+
+            all_rho.append(detach(rho)) 
+            all_ux.append(detach(ux))
+            all_uy.append(detach(uy))
+            all_T.append(detach(T))
+
+
+
             Feq = cylinder_solver.get_Feq(rho, ux, uy, T)
             Geq, khi, zetax, zetay = cylinder_solver.get_Geq_Newton_solver(rho,
                                                                            ux, 
@@ -491,6 +512,10 @@ def main():
                                                                            khi0, 
                                                                            zetax0, 
                                                                            zetay0)
+            
+            all_Feq.append(detach(Feq))
+            all_Geq.append(detach(Geq))
+
             Fi0, Gi0 = cylinder_solver.collision(Fi0, Gi0, Feq, Geq, rho, ux, uy, T)
             Fi, Gi = cylinder_solver.streaming(Fi0, Gi0)
             Fi_obs_cyl, Gi_obs_cyl, Fi_obs_Inlet, Gi_obs_Inlet = cylinder_solver.get_obs_distribution(
@@ -502,6 +527,11 @@ def main():
                                                                 zetax,
                                                                 zetay)
             
+            all_Fi_obs_cyl.append(detach(Fi_obs_cyl))
+            all_Gi_obs_cyl.append(detach(Gi_obs_cyl))
+            all_Fi_obs_Inlet.append(detach(Fi_obs_Inlet))
+            all_Gi_obs_Inlet.append(detach(Gi_obs_Inlet))
+            
             Fi_new, Gi_new = cylinder_solver.enforce_Obs_and_BC(Fi,
                                                                 Gi,
                                                                 Fi_obs_cyl,
@@ -509,18 +539,7 @@ def main():
                                                                 Fi_obs_Inlet,
                                                                 Gi_obs_Inlet)
             
-            all_rho.append(detach(rho)) 
-            all_ux.append(detach(ux))
-            all_uy.append(detach(uy))
-            all_T.append(detach(T))
-            all_Feq.append(detach(Feq))
-            all_Geq.append(detach(Geq))
-            all_Fi0.append(detach(Fi0))
-            all_Gi0.append(detach(Gi0))
-            all_Fi_obs_cyl.append(detach(Fi_obs_cyl))
-            all_Gi_obs_cyl.append(detach(Gi_obs_cyl))
-            all_Fi_obs_Inlet.append(detach(Fi_obs_Inlet))
-            all_Gi_obs_Inlet.append(detach(Gi_obs_Inlet))
+
     
             # Update the distributions
             Fi0 = Fi_new
@@ -529,7 +548,7 @@ def main():
             zetax0 = zetax
             zetay0 = zetay
 
-            if args.plot and (i % 15 == 0):
+            if args.plot and (i % 100 == 0):
                 Ma = cylinder_solver.get_local_Mach(ux, uy, T)
                 plot_simulation_results(detach(Ma), i)
                 
