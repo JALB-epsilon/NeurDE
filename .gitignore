@@ -2,3 +2,4 @@ SOD_shock_tube/src/__pycache__/*
 *.pyc
 *.png
 *.h5
+Cylinder/torch_solver_not_working/*
