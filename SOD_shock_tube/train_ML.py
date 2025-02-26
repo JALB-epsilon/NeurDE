@@ -17,8 +17,6 @@ def dispatch_optimizer(model,lr=0.001):
         return optimizer
         
 
-def 
-
 if __name__ == "__main__":
 
     torch.manual_seed(0)
@@ -31,9 +29,8 @@ if __name__ == "__main__":
     args.add_argument("--hidden_dim", type=int, default=32)
     args.add_argument("--num_layers", type=int, default=4)
     args.add_argument('--case', type=int, choices=[1, 2], help='Choose case 1 or 2', default=1)
-
     args.add_argument("--num_rollouts", type=int, default=5)
-    args.add_argument("pre_trained_path", type=str, default=None)
+    args.add_argument("--pre_trained_path", type=str, default=None)
     args = args.parse_args()
     
 
@@ -65,11 +62,14 @@ if __name__ == "__main__":
                             device=case_params['device']
                             )  
     # train_loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True)
-    model = DeepONetCP(branch_layer=[4]+[args.hidden_dim]*args.num_layers,trunk_layer=[2]+[args.hidden_dim]*args.num_layers)
+
+    model = DeepONetCP(branch_layer=[4]+[args.hidden_dim]*args.num_layers,trunk_layer=[2]+[args.hidden_dim]*args.num_layers,activation='relu')
+
+
     if args.pre_trained_path is not None:
         checkpoint = torch.load(args.pre_trained_path)
         model.load_state_dict(checkpoint["model_state_dict"])
-        
+
     model = model.cuda()
     optimizer = dispatch_optimizer(model,lr=args.lr)
     loss_func = nn.MSELoss()
@@ -77,8 +77,7 @@ if __name__ == "__main__":
     ey = sod_solver.ey
     basis = torch.stack([ex,ey],dim=-1).cuda()
     initial_conditions_func = getattr(sod_solver, case_params['initial_conditions_func'])
-    Fi0, Gi0, _, _, _ = initial_conditions_func()
-    # load data from file
+
     with h5py.File(f"data_base/{case_params["filename"]}","r") as f:
         all_ux = f["ux"][:]
         all_uy = f["uy"][:]
@@ -93,10 +92,6 @@ if __name__ == "__main__":
     from tqdm import tqdm
     for epoch in tqdm(range(args.epochs), desc="Training epochs"):
         loss_epoch = 0 
-        avg_loss_Hfunc = 0
-        avg_loss_qx = 0
-        avg_loss_qy = 0
-        avg_loss_E = 0
         avg_loss_G = 0
         avg_loss_F = 0
         for i in range(50):
@@ -114,7 +109,7 @@ if __name__ == "__main__":
                 Feq_target = torch.tensor(all_Feq[i + rollout]).float().cuda()
                 Feq = sod_solver.get_Feq(rho, ux, uy, T)
                 Geq_NN = model(inputs, basis)
-
+                Geq_NN = Geq_NN.permute(1, 0).reshape(9, sod_solver.Y, sod_solver.X)
                 data_loss_F = loss_func(Feq, Feq_target)
                 data_loss_G = loss_func(Geq_NN, Geq_target)
                 # Compute loss
@@ -122,7 +117,7 @@ if __name__ == "__main__":
                 loss_epoch += loss.item()
                 avg_loss_G += data_loss_G.item()
                 avg_loss_F += data_loss_F.item()
-                Geq_NN = Geq_NN.permute(1, 0).reshape(9, sod_solver.Y, sod_solver.X)
+
                 # Update initial conditions for next rollout
                 Fi0, Gi0 = sod_solver.collision(Fi0, Gi0, Feq, Geq_NN, rho, ux, uy, T) # maybe we need new vars to attach all gradients
                 Fi, Gi = sod_solver.streaming(Fi0, Gi0)
@@ -135,10 +130,6 @@ if __name__ == "__main__":
                     f"Geq relative error: {Geq_err.item():.2e} at rollout {rollout+1}/{args.num_rollouts}")
         n_total = (i + 1) * args.num_rollouts
         print(f"Epoch: {epoch}, loss: {loss_epoch / n_total:.3e}")
-        print(f"Epoch: {epoch}, loss_Hfunc: {avg_loss_Hfunc / n_total:.3e}")
-        print(f"Epoch: {epoch}, loss_E: {avg_loss_E / n_total:.3e}")
-        print(f"Epoch: {epoch}, loss_qx: {avg_loss_qx / n_total:.3e}")
-        print(f"Epoch: {epoch}, loss_qy: {avg_loss_qy / n_total:.3e}")
         print(f"Epoch: {epoch}, loss_F: {avg_loss_F / n_total:.3e}")
         print(f"Epoch: {epoch}, loss_G: {avg_loss_G / n_total:.3e}")
         if epoch % 10 == 0:

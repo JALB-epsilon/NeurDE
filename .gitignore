@@ -3,3 +3,4 @@ SOD_shock_tube/src/__pycache__/*
 *.png
 *.h5
 Cylinder/torch_solver_not_working/*
+*.pt
