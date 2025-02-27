@@ -2,30 +2,52 @@
   hidden_dim: 64
   num_layers: 4
   data_dir: data_base/SOD_case1.h5
-  stage1: 
+  stage1:
     epochs: 2500
     lr: 0.001
     model_dir: results/case1/stage1
-    step_size: 400
-    gamma: 0.5
-  stage2: 
+    scheduler: CosineAnnealingWarmRestarts
+    scheduler_config:
+      CosineAnnealingWarmRestarts:
+        T_0: 1250 
+        T_mult: 2
+        eta_min: 0.00001
+  stage2:
     epochs: 300
     lr: 0.0001
     model_dir: results/case1/stage2
+    scheduler: OneCycleLR
     N: 25
+    scheduler_config:
+      OneCycleLR:
+        max_lr: 0.0005  
+        pct_start: 0.3
+        div_factor: 10
+        final_div_factor: 100
 
 2:
   hidden_dim: 64
   num_layers: 4
   data_dir: data_base/SOD_case2.h5
-  stage1: 
+  stage1:
     epochs: 2500
     lr: 0.001
     model_dir: results/case2/stage1
-    step_size: 400
-    gamma: 0.5
-  stage2: 
+    scheduler: CosineAnnealingWarmRestarts
+    scheduler_config:
+      CosineAnnealingWarmRestarts:
+        T_0: 1250 
+        T_mult: 2
+        eta_min: 0.00001
+  stage2:
     epochs: 300
     lr: 0.0001
     model_dir: results/case2/stage2
     N: 25
+    scheduler: OneCycleLR
+    scheduler_config:
+      OneCycleLR:
+        max_lr: 0.0005 
+        pct_start: 0.3
+        div_factor: 10
+        final_div_factor: 100
