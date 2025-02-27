@@ -19,3 +19,5 @@ dependencies:
     - torch
     - torchvision
     - torchaudio
+    - adabelief-pytorch
+    - lion-pytorch

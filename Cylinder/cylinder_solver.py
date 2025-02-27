@@ -470,6 +470,7 @@ def main():
         cylinder_solver.shift_operator = torch.compile(cylinder_solver.shift_operator, dynamic=True, fullgraph=False)
         cylinder_solver.get_macroscopic = torch.compile(cylinder_solver.get_macroscopic, dynamic=True, fullgraph=False)
         cylinder_solver.get_Feq = torch.compile(cylinder_solver.get_Feq, dynamic=True, fullgraph=False) 
+        cylinder_solver.get_relaxation_time = torch.compile(cylinder_solver.get_relaxation_time, dynamic=True, fullgraph=False)
       
     Fi0, Gi0, khi0, zetax0, zetay0 = cylinder_solver.initial_conditions()
 

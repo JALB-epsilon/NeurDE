@@ -2,6 +2,7 @@ import numpy as np
 import torch
 import os
 import matplotlib.pyplot as plt
+import h5py
 
 def detach(x):
     return x.detach().cpu().numpy()
@@ -14,7 +15,19 @@ def get_device(device_index):
         selected_device = 'cpu'
     return selected_device
 
+def set_seed(seed=0):
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    torch.cuda.manual_seed(seed)
 
+def load_equilibrium_state(file_path):
+    with h5py.File(file_path, "r") as f:
+        all_rho = f["rho"][:]
+        all_ux = f["ux"][:]
+        all_uy = f["uy"][:]
+        all_T = f["T"][:]
+        all_Geq = f["Geq"][:]
+        return all_rho, all_ux, all_uy, all_T, all_Geq
 
 def plot_simulation_results(rho, ux, T, P, i, case_number):
     """Plots and saves simulation results with larger title and reduced whitespace."""

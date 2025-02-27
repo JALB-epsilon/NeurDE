@@ -1,27 +1,20 @@
 import torch
 import torch.nn as nn
 import numpy as np
-from src import DeepONetCP
-from utilities import detach, get_device
+from architectures import DeepONetCP
+from utilities import detach, get_device, dispatch_optimizer
 import argparse
 from SOD_solver import SODSolver
 import h5py
 import yaml
 import os
-def dispatch_optimizer(model,lr=0.001):
-    if isinstance(model,torch.nn.Module):
-        optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-        return optimizer
-    elif isinstance(model,list):
-        optimizer = [torch.optim.Adam(model[i].parameters(), lr=lr) for i in range(3)]
-        return optimizer
-        
+
+
+
+
 
 if __name__ == "__main__":
-
-    torch.manual_seed(0)
-    np.random.seed(0)
-    torch.cuda.manual_seed(0)
+    set_seed(42)
     args = argparse.ArgumentParser()
     args.add_argument("--batch_size", type=int, default=16)
     args.add_argument("--lr", type=float, default=0.001)
