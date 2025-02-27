@@ -3,6 +3,7 @@ import torch
 import os
 import matplotlib.pyplot as plt
 import h5py
+from torch.utils.data import Dataset
 
 def detach(x):
     return x.detach().cpu().numpy()
@@ -28,6 +29,28 @@ def load_equilibrium_state(file_path):
         all_T = f["T"][:]
         all_Geq = f["Geq"][:]
         return all_rho, all_ux, all_uy, all_T, all_Geq
+    
+
+# loss function
+def calculate_relative_error(pred, target):
+    return torch.norm(pred - target) / torch.norm(target)
+
+
+class SodDataset(Dataset):
+    def __init__(self, rho, ux, uy, T, Geq):
+        self.rho = torch.tensor(rho, dtype=torch.float32)
+        self.ux = torch.tensor(ux, dtype=torch.float32)
+        self.uy = torch.tensor(uy, dtype=torch.float32)
+        self.T = torch.tensor(T, dtype=torch.float32)
+        self.Geq = torch.tensor(Geq, dtype=torch.float32)
+
+    def __len__(self):
+        return len(self.rho)
+
+    def __getitem__(self, idx):
+        return self.rho[idx], self.ux[idx], self.uy[idx], self.T[idx], self.Geq[idx]
+    
+
 
 def plot_simulation_results(rho, ux, T, P, i, case_number):
     """Plots and saves simulation results with larger title and reduced whitespace."""

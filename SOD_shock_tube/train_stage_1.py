@@ -1,12 +1,12 @@
 import torch
 import torch.nn as nn
 from architectures import NeurDE
-from utilities import set_seed, get_device, load_equilibrium_state, dispatch_optimizer, calculate_relative_error
+from utilities import *
 import argparse
 import yaml
 from tqdm import tqdm
 import os
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import DataLoader
 
 def create_basis(Uax, Uay, device):
     ex_values = [1, 0, -1, 0, 1, -1, -1, 1, 0]
@@ -15,20 +15,6 @@ def create_basis(Uax, Uay, device):
     ey = torch.tensor(ey_values, dtype=torch.float32) + Uay
     basis = torch.stack([ex, ey], dim=-1).to(device)
     return basis
-
-class SodDataset(Dataset):
-    def __init__(self, rho, ux, uy, T, Geq):
-        self.rho = torch.tensor(rho, dtype=torch.float32)
-        self.ux = torch.tensor(ux, dtype=torch.float32)
-        self.uy = torch.tensor(uy, dtype=torch.float32)
-        self.T = torch.tensor(T, dtype=torch.float32)
-        self.Geq = torch.tensor(Geq, dtype=torch.float32)
-
-    def __len__(self):
-        return len(self.rho)
-
-    def __getitem__(self, idx):
-        return self.rho[idx], self.ux[idx], self.uy[idx], self.T[idx], self.Geq[idx]
 
 if __name__ == "__main__":
     set_seed(0)
@@ -41,6 +27,7 @@ if __name__ == "__main__":
     parser.add_argument('--case', type=int, choices=[1, 2], default=1, help='Case 1 or 2')
     parser.add_argument('--num_samples', type=int, default=500, help='Number of samples')
     parser.add_argument("--batch_size", type=int, default=32, help='Batch size')
+    parser.add_argument("--save_frequency", default=50, help='Save model')
     parser.set_defaults(save_model=True)
     args = parser.parse_args()
 
@@ -67,6 +54,7 @@ if __name__ == "__main__":
         activation='relu'
     ).to(device)
 
+
     if args.compile:
         model = torch.compile(model)
 
@@ -75,12 +63,9 @@ if __name__ == "__main__":
                                     optimizer_type="AdamW")
 
     total_steps = len(dataloader) * param_training["stage1"]["epochs"]
-    scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer,
-                                                    max_lr=1e-3,
-                                                    total_steps=total_steps,
-                                                    pct_start=0.3,
-                                                    div_factor=10,
-                                                    final_div_factor=100)
+    scheduler_type = param_training["stage1"]["scheduler"]
+    scheduler_config = param_training["stage1"].get("scheduler_config", {}).get(scheduler_type,{}) 
+    scheduler = get_scheduler(optimizer, scheduler_type, total_steps, scheduler_config)
 
     Uax, Uay = case_params["Uax"], case_params["Uay"]
     basis = create_basis(Uax, Uay, device)
@@ -95,6 +80,9 @@ if __name__ == "__main__":
     best_losses = [float('inf')] * 3
     best_models = [None] * 3
     best_model_paths = [None] * 3
+
+    save_frequency = args.save_frequency
+    epochs_since_last_save = [0] * 3 
 
     for epoch in tqdm(range(epochs), desc="Epochs"):
         loss_epoch = 0
@@ -120,28 +108,23 @@ if __name__ == "__main__":
             best_losses[max_index] = current_loss
             best_models[max_index] = model.state_dict()
 
-        if args.save_model and (epoch + 1) % 20 == 0:
-            for i, (loss, model_state) in enumerate(zip(best_losses, best_models)):
-                if model_state is not None:
-                    if best_model_paths[i] and os.path.exists(best_model_paths[i]):
-                        os.remove(best_model_paths[i])
-                    save_path = os.path.join(param_training["stage1"]["model_dir"], f"best_model_{args.case}_epoch_{epoch+1}_top_{i+1}_loss_{loss:.6f}.pt")
-                    torch.save(model_state, save_path)
-                    print(f"Top {i+1} model saved to: {save_path}")
-                    best_model_paths[i] = save_path
+            if args.save_model and epochs_since_last_save[max_index] >= save_frequency:
+                if best_model_paths[max_index] and os.path.exists(best_model_paths[max_index]):
+                    os.remove(best_model_paths[max_index])
+                save_path = os.path.join(param_training["stage1"]["model_dir"], f"best_model_{args.case}_epoch_{epoch+1}_top_{max_index+1}_loss_{current_loss:.6f}.pt")
+                torch.save(best_models[max_index], save_path)
+                print(f"Top {max_index+1} model saved to: {save_path}")
+                best_model_paths[max_index] = save_path
+                epochs_since_last_save[max_index] = 0 #reset the counter
+            else:
+                epochs_since_last_save[max_index] +=1
+
+        else:
+            for i in range(3):
+                epochs_since_last_save[i] +=1
 
     if not args.save_model:
         print("Model saving disabled.")
-
-    if args.save_model:
-        sorted_indices = sorted(range(len(best_losses)), key=lambda k: best_losses[k])
-        sorted_losses = [best_losses[i] for i in sorted_indices]
-        sorted_models = [best_models[i] for i in sorted_indices]
-        sorted_paths = [best_model_paths[i] for i in sorted_indices]
-
-    print("Sorted Best Models:")
-    for i, loss in enumerate(sorted_losses):
-        print(f"Top {i+1} Loss: {loss:.6f}, Path: {sorted_paths[i]}")
 
     print("Training complete.")
     

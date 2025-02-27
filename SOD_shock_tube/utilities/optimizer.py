@@ -1,6 +1,8 @@
 import torch
 from torch import optim
 
+
+# Added optimizer_type
 def dispatch_optimizer(model, lr=0.001, optimizer_type='AdamW'):  # Added optimizer_type
 
     if isinstance(model, torch.nn.Module):
@@ -34,6 +36,39 @@ def dispatch_optimizer(model, lr=0.001, optimizer_type='AdamW'):  # Added optimi
         else: #default
             optimizers = [optim.Adam(model[i].parameters(), lr=lr) for i in range(len(model))]
         return optimizers
+    
 
-def calculate_relative_error(pred, target):
-    return torch.norm(pred - target) / torch.norm(target)
+#add the scheduler_type
+def get_scheduler(optimizer, scheduler_type, total_steps, config):
+    if scheduler_type == "OneCycleLR":
+        return torch.optim.lr_scheduler.OneCycleLR(
+            optimizer,
+            max_lr=config.get("max_lr", 1e-3),
+            total_steps=total_steps,
+            pct_start=config.get("pct_start", 0.3),
+            div_factor=config.get("div_factor", 10),
+            final_div_factor=config.get("final_div_factor", 100),
+        )
+    elif scheduler_type == "CosineAnnealingWarmRestarts":
+        return torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+            optimizer,
+            T_0=config.get("T_0", total_steps // 10),
+            T_mult=config.get("T_mult", 2),
+            eta_min=config.get("eta_min", 0),
+        )
+    elif scheduler_type == "ReduceLROnPlateau":
+        return torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            mode=config.get("mode", "min"),
+            factor=config.get("factor", 0.1),
+            patience=config.get("patience", 10),
+        )
+    elif scheduler_type == "StepLR":
+        return torch.optim.lr_scheduler.StepLR(
+            optimizer,
+            step_size=config.get("step_size", 30),
+            gamma=config.get("gamma", 0.1)
+        )
+    else:
+        raise ValueError(f"Scheduler type '{scheduler_type}' not supported.")
+
