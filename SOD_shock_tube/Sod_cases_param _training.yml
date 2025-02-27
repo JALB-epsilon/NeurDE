@@ -3,10 +3,10 @@
   num_layers: 4
   data_dir: data_base/SOD_case1.h5
   stage1: 
-    epochs: 2000
+    epochs: 2500
     lr: 0.001
     model_dir: results/case1/stage1
-    step_size: 100
+    step_size: 400
     gamma: 0.5
   stage2: 
     epochs: 300
@@ -19,10 +19,10 @@
   num_layers: 4
   data_dir: data_base/SOD_case2.h5
   stage1: 
-    epochs: 2000
+    epochs: 2500
     lr: 0.001
     model_dir: results/case2/stage1
-    step_size: 100
+    step_size: 400
     gamma: 0.5
   stage2: 
     epochs: 300

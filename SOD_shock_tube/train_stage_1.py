@@ -133,6 +133,16 @@ if __name__ == "__main__":
     if not args.save_model:
         print("Model saving disabled.")
 
+    if args.save_model:
+        sorted_indices = sorted(range(len(best_losses)), key=lambda k: best_losses[k])
+        sorted_losses = [best_losses[i] for i in sorted_indices]
+        sorted_models = [best_models[i] for i in sorted_indices]
+        sorted_paths = [best_model_paths[i] for i in sorted_indices]
+
+    print("Sorted Best Models:")
+    for i, loss in enumerate(sorted_losses):
+        print(f"Top {i+1} Loss: {loss:.6f}, Path: {sorted_paths[i]}")
+
     print("Training complete.")
     
 '''import torch
