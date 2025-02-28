@@ -31,6 +31,15 @@ def load_equilibrium_state(file_path):
         return all_rho, all_ux, all_uy, all_T, all_Geq
     
 
+def load_data_stage_2(file_path):
+    with h5py.File(file_path, "r") as f:
+        all_F = f["Fi0"][:]
+        all_G = f["Gi0"][:]
+        all_Feq = f["Feq"][:]
+        all_Geq = f["Geq"][:]
+        return all_F, all_G, all_Feq, all_Geq
+    
+
 # loss function
 def calculate_relative_error(pred, target):
     return torch.norm(pred - target) / torch.norm(target)
@@ -50,6 +59,42 @@ class SodDataset(Dataset):
     def __getitem__(self, idx):
         return self.rho[idx], self.ux[idx], self.uy[idx], self.T[idx], self.Geq[idx]
     
+
+
+class SodDataset_stage2(Dataset):
+    def __init__(self, F, G, Feq, Geq):
+        self.F = torch.tensor(F, dtype=torch.float32)
+        self.G = torch.tensor(G, dtype=torch.float32)
+        self.Feq = torch.tensor(Feq, dtype=torch.float32)
+        self.Geq = torch.tensor(Geq, dtype=torch.float32)
+
+    def __len__(self):
+        return len(self.F)
+
+    def __getitem__(self, idx):
+        return self.F[idx], self.G[idx], self.Feq[idx], self.Geq[idx]
+    
+
+
+class RolloutBatchDataset(Dataset):
+    def __init__(self, all_Fi, all_Gi, all_Feq, all_Geq, number_of_rollout):
+        self.all_Fi = all_Fi
+        self.all_Gi = all_Gi
+        self.all_Feq = all_Feq
+        self.all_Geq = all_Geq
+        self.number_of_rollout = number_of_rollout
+        self.num_sequences = len(all_Fi) - number_of_rollout + 1
+
+    def __len__(self):
+        return self.num_sequences
+
+    def __getitem__(self, idx):
+        Fi_sequence = [torch.tensor(self.all_Fi[idx + r]).float() for r in range(self.number_of_rollout)]
+        Gi_sequence = [torch.tensor(self.all_Gi[idx + r]).float() for r in range(self.number_of_rollout)]
+        Feq_targets = [torch.tensor(self.all_Feq[idx + r]).float() for r in range(self.number_of_rollout)]
+        Geq_targets = [torch.tensor(self.all_Geq[idx + r]).float() for r in range(self.number_of_rollout)]
+        return Fi_sequence, Gi_sequence, Feq_targets, Geq_targets
+
 
 
 def plot_simulation_results(rho, ux, T, P, i, case_number):
