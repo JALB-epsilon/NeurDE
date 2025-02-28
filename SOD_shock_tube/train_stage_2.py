@@ -115,7 +115,7 @@ if __name__ == "__main__":
             loss = 0
             optimizer.zero_grad()
             model.train()
-            for rollout in range(number_of_rollout):
+            for rollout in range(len(Geq_seq)):
                 rho, ux, uy, E = sod_solver.get_macroscopic(Fi0.squeeze(0), Gi0.squeeze(0))
                 T = sod_solver.get_temp_from_energy(ux, uy, E)
                 Feq = sod_solver.get_Feq(rho, ux, uy, T)
@@ -129,12 +129,12 @@ if __name__ == "__main__":
                 Fi0 = Fi
                 Gi0 = Gi
                 # Print rollout 
-                print(f"Epoch: {epoch}, Batch ID: {batch_idx}, Rollout: {rollout}, Loss: {inner_lose:.10f}")
+                #print(f"Epoch: {epoch}, Batch ID: {batch_idx}, Rollout: {rollout}, Loss: {inner_lose:.10f}")
 
 
             loss.backward()
             optimizer.step()
-            print(f"Epoch: {epoch}, Loss: {loss.item():.6f}")
+            print(f"Epoch: {epoch}, Loss: {loss.item()/len(Geq_seq):.6f}")
 
 
 

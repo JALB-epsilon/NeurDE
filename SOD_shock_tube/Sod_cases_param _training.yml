@@ -3,15 +3,15 @@
   num_layers: 4
   data_dir: data_base/SOD_case1.h5
   stage1:
-    epochs: 2500
-    lr: 0.001
+    epochs: 3000
+    lr: 0.0001
     model_dir: results/case1/stage1
     scheduler: CosineAnnealingWarmRestarts
     scheduler_config:
       CosineAnnealingWarmRestarts:
-        T_0: 1250 
+        T_0: 1500 
         T_mult: 2
-        eta_min: 0.00001
+        eta_min: 0.000005
   stage2:
     epochs: 300
     lr: 0.0001
@@ -30,15 +30,15 @@
   num_layers: 4
   data_dir: data_base/SOD_case2.h5
   stage1:
-    epochs: 2500
-    lr: 0.001
+    epochs: 3000
+    lr: 0.0001
     model_dir: results/case2/stage1
     scheduler: CosineAnnealingWarmRestarts
     scheduler_config:
       CosineAnnealingWarmRestarts:
-        T_0: 1250 
+        T_0: 1500 
         T_mult: 2
-        eta_min: 0.00001
+        eta_min: 0.000005
   stage2:
     epochs: 300
     lr: 0.0001
