@@ -9,7 +9,7 @@ def detach(x):
     return x.detach().cpu().numpy()
 
 def get_device(device_index):
-    device_map = {0: 'cpu', 1: 'cuda:1', 2: 'cuda:2', 3: 'cuda:3'}
+    device_map = {-1: 'cpu', 0: 'cuda:0', 1: 'cuda:1', 2: 'cuda:2', 3: 'cuda:3'}
     selected_device = device_map.get(device_index, 'cpu')
     if selected_device.startswith('cuda') and not torch.cuda.is_available():
         print(f"CUDA not available. Switching to CPU {torch.cuda.is_available()}.")

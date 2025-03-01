@@ -48,6 +48,13 @@ class SODSolver(nn.Module):
         self.R = self.Cp-self.Cv  #gas constant
         self.shifts_y = -self.ey1.int()
         self.shifts_x = self.ex1.int()
+        self.q_indices = torch.arange(self.Qn, device=self.device)[:, None, None]
+        Y_indices = (torch.arange(self.Y, device=self.device)[None, :, None] - self.shifts_y[:, None, None]) % self.Y
+        X_indices = (torch.arange(self.X, device=self.device)[None, None, :] - self.shifts_x[:, None, None]) % self.X
+
+        self.Y_indices = Y_indices.expand(self.Qn, self.Y, self.X)
+        self.X_indices = X_indices.expand(self.Qn, self.Y, self.X)
+
 
     def dot_prod(self, ux, uy):
         return ux**2 + uy**2
@@ -199,16 +206,8 @@ class SODSolver(nn.Module):
         return F_pos_collision, G_pos_collision
     
     def shift_operator(self, F, G):
-        q_indices = torch.arange(self.Qn, device=self.device)[:, None, None]
-        Y_indices = (torch.arange(self.Y, device=self.device)[None, :, None] - self.shifts_y[:, None, None]) % self.Y
-        X_indices = (torch.arange(self.X, device=self.device)[None, None, :] - self.shifts_x[:, None, None]) % self.X
-
-        Y_indices = Y_indices.expand(self.Qn, self.Y, self.X)
-        X_indices = X_indices.expand(self.Qn, self.Y, self.X)
-
-        Fi = F[q_indices, Y_indices, X_indices]
-        Gi = G[q_indices, Y_indices, X_indices]
-        del q_indices, Y_indices, X_indices
+        Fi = F[self.q_indices, self.Y_indices, self.X_indices]
+        Gi = G[self.q_indices, self.Y_indices, self.X_indices]       
         return Fi, Gi
     
     def streaming(self, F_pos_coll, G_pos_coll):
