@@ -4,3 +4,4 @@ SOD_shock_tube/src/__pycache__/*
 *.h5
 Cylinder/torch_solver_not_working/*
 *.pt
+SOD_shock_tube/experiments_ant_check_code.py

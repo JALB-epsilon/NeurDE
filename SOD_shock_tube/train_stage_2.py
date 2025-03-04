@@ -107,42 +107,50 @@ if __name__ == "__main__":
     save_frequency = args.save_frequency
     epochs_since_last_save = [0] * 3
     last_epoch_loss = 0.0
+
+    # Get the first batch from the dataloader
+    first_batch = next(iter(dataloader))
+    Fi0, Gi0, Feq_seq, Geq_seq = first_batch
+    Fi0 = Fi0[0, 0, ...].to(device)
+    Gi0 = Gi0[0, 0, ...].to(device)
+
     for epoch in tqdm(range(epochs), desc="Epochs"):
         loss_epoch = 0
         for batch_idx, (F_seq, G_seq, Feq_seq, Geq_seq) in enumerate(dataloader):
-            Fi0 = F_seq[0].to(device)
-            Gi0 = G_seq[0].to(device)
-            loss = 0
             optimizer.zero_grad()
             model.train()
-            for rollout in range(len(Geq_seq)):
-                rho, ux, uy, E = sod_solver.get_macroscopic(Fi0.squeeze(0), Gi0.squeeze(0))
+            total_loss = 0
+            F_seq = F_seq.to(device)
+            G_seq = G_seq.to(device)
+            Fi0 = F_seq[0, 0, ...].to(device)
+            Gi0 = G_seq[0, 0, ...].to(device)
+            for rollout in range(number_of_rollout):       
+                rho, ux, uy, E = sod_solver.get_macroscopic(Fi0, Gi0)
                 T = sod_solver.get_temp_from_energy(ux, uy, E)
                 Feq = sod_solver.get_Feq(rho, ux, uy, T)
                 inputs = torch.stack([rho.unsqueeze(0), ux.unsqueeze(0), uy.unsqueeze(0), T.unsqueeze(0)], dim=1).to(device)
                 Geq_pred = model(inputs, basis)
-                Geq_target = Geq_seq[rollout].to(device)
-                inner_lose = loss_func(Geq_pred, Geq_target.permute(0, 2, 3, 1).reshape(-1, 9))
-                loss += inner_lose
-                Fi0, Gi0 = sod_solver.collision(Fi0.squeeze(0), Gi0.squeeze(0), Feq, Geq_pred.permute(1, 0).reshape(9, sod_solver.Y, sod_solver.X), rho, ux, uy, T)
+                Geq_target = Geq_seq[0, rollout].to(device)
+                inner_loss = loss_func(Geq_pred, Geq_target.permute(1, 2, 0).reshape(-1, 9))
+                total_loss += inner_loss
+                Fi0, Gi0 = sod_solver.collision(Fi0, Gi0, Feq, Geq_pred.permute(1, 0).reshape(9, sod_solver.Y, sod_solver.X), rho, ux, uy, T)
                 Fi, Gi = sod_solver.streaming(Fi0, Gi0)
                 Fi0 = Fi
                 Gi0 = Gi
-                # Print rollout 
-                #print(f"Epoch: {epoch}, Batch ID: {batch_idx}, Rollout: {rollout}, Loss: {inner_lose:.10f}")
 
-
-            loss.backward()
+            total_loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
-            print(f"Epoch: {epoch}, Loss: {loss.item()/len(Geq_seq):.6f}")
+            loss_epoch += total_loss.item()
+            print(f"Epoch: {epoch}, Batch ID: {batch_idx}, Loss: {total_loss.item()/number_of_rollout:.6f}")
 
+        scheduler.step()
 
 
         if epoch % 100 == 0:
-            print(f"Epoch: {epoch}, Loss: {loss.item():.6f}")
+            print(f"Epoch: {epoch}, Loss: {loss_epoch/len(dataloader):.6f}")
 
-        current_loss = loss.item()
-
+        current_loss = loss_epoch / len(dataloader)
 
         if current_loss < max(best_losses):
             max_index = best_losses.index(max(best_losses))
@@ -156,13 +164,13 @@ if __name__ == "__main__":
                 torch.save(best_models[max_index], save_path)
                 print(f"Top {max_index+1} model saved to: {save_path}")
                 best_model_paths[max_index] = save_path
-                epochs_since_last_save[max_index] = 0 #reset the counter
+                epochs_since_last_save[max_index] = 0  # reset the counter
             else:
-                epochs_since_last_save[max_index] +=1
+                epochs_since_last_save[max_index] += 1
 
         else:
             for i in range(3):
-                epochs_since_last_save[i] +=1
+                epochs_since_last_save[i] += 1
 
     # Save the last model with its loss
     if args.save_model:
@@ -175,6 +183,7 @@ if __name__ == "__main__":
         print("Model saving disabled.")
 
     print("Training complete.")
+
     
 '''import torch
 import torch.nn as nn

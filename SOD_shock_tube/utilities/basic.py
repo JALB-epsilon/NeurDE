@@ -83,22 +83,16 @@ class RolloutBatchDataset(Dataset):
         self.all_Feq = all_Feq
         self.all_Geq = all_Geq
         self.number_of_rollout = number_of_rollout
-        self.num_sequences = len(all_Fi)  # Use the total length
+        self.num_sequences = len(all_Fi)-number_of_rollout+1  # Use the total length
 
     def __len__(self):
         return self.num_sequences
 
     def __getitem__(self, idx):
-        Fi_sequence = []
-        Gi_sequence = []
-        Feq_targets = []
-        Geq_targets = []
-        actual_rollout_length = min(self.number_of_rollout, len(self.all_Fi) - idx) #handle the edge case
-        for r in range(actual_rollout_length):
-            Fi_sequence.append(torch.tensor(self.all_Fi[idx + r]).float())
-            Gi_sequence.append(torch.tensor(self.all_Gi[idx + r]).float())
-            Feq_targets.append(torch.tensor(self.all_Feq[idx + r]).float())
-            Geq_targets.append(torch.tensor(self.all_Geq[idx + r]).float())
+        Fi_sequence = torch.tensor(self.all_Fi[idx:idx + self.number_of_rollout]).float()
+        Gi_sequence = torch.tensor(self.all_Gi[idx:idx + self.number_of_rollout]).float()
+        Feq_targets = torch.tensor(self.all_Feq[idx:idx + self.number_of_rollout]).float()
+        Geq_targets = torch.tensor(self.all_Geq[idx:idx + self.number_of_rollout]).float()
 
         return Fi_sequence, Gi_sequence, Feq_targets, Geq_targets
 

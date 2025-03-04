@@ -19,7 +19,7 @@ if __name__ == "__main__":
     parser.add_argument('--save_model', action='store_true', help='Save model checkpoints (enabled by default)')
     parser.add_argument('--no-save_model', dest='save_model', action='store_false', help='Disable model checkpoint saving')
     parser.add_argument('--case', type=int, choices=[1, 2], default=1, help='Case 1 or 2')
-    parser.add_argument('--num_samples', type=int, default=200, help='Number of samples')
+    parser.add_argument('--num_samples', type=int, default=500, help='Number of samples')
     parser.add_argument("--init_cond",  type=int, default=500, help='Number of samples')
     parser.add_argument("--save_frequency", default=50, help='Save model')
     parser.add_argument("--trained_path", type=str, default=None)
