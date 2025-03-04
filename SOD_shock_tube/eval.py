@@ -18,7 +18,6 @@ if __name__ == "__main__":
     parser.add_argument("--compile", dest='compile', action='store_true', help='Compile', default=False)
     parser.add_argument('--save_model', action='store_true', help='Save model checkpoints (enabled by default)')
     parser.add_argument('--no-save_model', dest='save_model', action='store_false', help='Disable model checkpoint saving')
-    parser.add_argument('--case', type=int, choices=[1, 2], default=1, help='Case 1 or 2')
     parser.add_argument('--num_samples', type=int, default=500, help='Number of samples')
     parser.add_argument("--init_cond",  type=int, default=500, help='Number of samples')
     parser.add_argument("--save_frequency", default=50, help='Save model')
@@ -27,6 +26,14 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     device = get_device(args.device)
+
+    
+    args.trained_path = args.trained_path.replace("SOD_shock_tube/", "")
+    print(args.trained_path)
+    case_part = args.trained_path.split('/')[1]
+    case_number = ''.join(filter(str.isdigit, case_part))
+    args.case = int(case_number)
+    print(args.case)
 
     with open("Sod_cases_param.yml", 'r') as stream:
         config = yaml.safe_load(stream)
@@ -56,14 +63,6 @@ if __name__ == "__main__":
 
     os.makedirs(param_training["stage2"]["model_dir"], exist_ok=True)
     all_F, all_G, all_Feq, all_Geq = load_data_stage_2(param_training["data_dir"])
-    dataset = RolloutBatchDataset(all_Fi=all_F[args.num_samples: args.num_samples + args.init_cond],
-                                    all_Gi=all_G[args.num_samples: args.num_samples + args.init_cond],
-                                    all_Feq=all_Feq[args.num_samples: args.num_samples + args.init_cond],
-                                    all_Geq=all_Geq[args.num_samples: args.num_samples + args.init_cond],
-                                    number_of_rollout=args.num_samples,
-                                    )
-
-    dataloader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=4, pin_memory=True)  # batch size 1 to get each sequence.
 
     model = NeurDE(
         alpha_layer=[4] + [param_training["hidden_dim"]] * param_training["num_layers"],
@@ -71,19 +70,7 @@ if __name__ == "__main__":
         activation='relu'
     ).to(device)
 
-    if args.trained_path:
-        checkpoint = torch.load(args.trained_path)
-        new_state_dict = {}
 
-        for k, v in checkpoint.items():
-            if k.startswith("_orig_mod."):
-                new_k = k.replace("_orig_mod.", "")
-                new_state_dict[new_k] = v
-            else:
-                new_state_dict[k] = v
-
-        model.load_state_dict(new_state_dict)
-        print(f"Pre-trained model loaded from {args.trained_path}")
 
     if args.compile:
         model = torch.compile(model)
@@ -93,7 +80,22 @@ if __name__ == "__main__":
         sod_solver.get_macroscopic = torch.compile(sod_solver.get_macroscopic, dynamic=True, fullgraph=False)
         print("Model compiled.")
 
+    if args.trained_path:
+        if args.compile:
+            checkpoint = torch.load(args.trained_path)
+            model.load_state_dict(checkpoint)
+        elif not args.compile:
+            checkpoint = torch.load(args.trained_path)
+            new_state_dict = {}
 
+            for k, v in checkpoint.items():
+                if k.startswith("_orig_mod."):
+                    new_k = k.replace("_orig_mod.", "")
+                    new_state_dict[new_k] = v
+                else:
+                    new_state_dict[k] = v
+            model.load_state_dict(new_state_dict)
+        print(f"Trained model loaded from {args.trained_path}")
 
   
     with h5py.File(param_training["data_dir"], "r") as f:
@@ -113,8 +115,7 @@ if __name__ == "__main__":
    
     loss_func = calculate_relative_error
 
-    print(f"Training Case {args.case} on {device}.")
-
+    print(f"Testing Case {args.case} on {device}.")
 
     Fi0 = torch.tensor(all_Fi0[args.num_samples], device=device)
     Gi0 = torch.tensor(all_Gi0[args.num_samples], device=device)
@@ -127,7 +128,7 @@ if __name__ == "__main__":
                 inputs = torch.stack([rho.unsqueeze(0), ux.unsqueeze(0), uy.unsqueeze(0), T.unsqueeze(0)], dim=1).to(device)
                 Geq_pred = model(inputs, basis)
    
-                Geq_target = torch.tensor(all_Gi0[args.num_samples+i], device=device).unsqueeze(0)
+                Geq_target = torch.tensor(all_Gi0[args.num_samples], device=device).unsqueeze(0)
 
                 inner_lose = loss_func(Geq_pred, Geq_target.permute(0, 2, 3, 1).reshape(-1, 9))
                 loss += inner_lose
@@ -141,30 +142,30 @@ if __name__ == "__main__":
                 plt.figure(figsize=(16, 6))
                 case_number = args.case
                 # Larger title and reduced whitespace
-                plt.suptitle(f'SOD shock case {case_number} time {i}', fontweight='bold', fontsize=25, y=0.95) 
+                plt.suptitle(f'SOD shock case {case_number} time {i+args.init_cond}', fontweight='bold', fontsize=25, y=0.95) 
 
                 linewidth = 5
 
                 plt.subplot(221)
                 plt.plot(detach(rho[2, :]), linewidth=linewidth)
-                plt.plot(all_rho[args.num_samples+i, 2, :], linewidth=2)
+                plt.plot(all_rho[args.init_cond+i, 2, :], linewidth=2)
 
                 plt.title('Density', fontsize=18)  # Slightly increased fontsize
 
                 plt.subplot(222)
                 plt.plot(detach(T[2, :]), linewidth=linewidth)
-                plt.plot((all_T[args.num_samples+i, 2, :]), linewidth=2)
+                plt.plot((all_T[args.init_cond+i, 2, :]), linewidth=2)
                 plt.title('Temperature', fontsize=18)
 
                 plt.subplot(223)
                 plt.plot(detach(ux[2, :]), linewidth=linewidth)
-                plt.plot((all_ux[args.num_samples+i, 2, :]), linewidth=2)
+                plt.plot((all_ux[args.init_cond+i, 2, :]), linewidth=2)
                 plt.title('Velocity in x', fontsize=18)
 
                 plt.subplot(224)
                 P = rho * T
                 plt.plot(detach(P[2, :]), linewidth=linewidth)
-                plt.plot((all_P[args.num_samples+i, 2, :]), linewidth=2)
+                plt.plot((all_P[args.init_cond+i, 2, :]), linewidth=2)
                 plt.title('Pressure', fontsize=18)
 
  
@@ -173,5 +174,5 @@ if __name__ == "__main__":
 
                 image_dir = os.path.join(f'images/ SOD_case{case_number}/test_NN')
                 os.makedirs(image_dir, exist_ok=True)
-                plt.savefig(os.path.join(image_dir, f'SOD_case{case_number}_{i}.png'))
+                plt.savefig(os.path.join(image_dir, f'SOD_case{case_number}_{i+args.init_cond}.png'))
                 plt.close()

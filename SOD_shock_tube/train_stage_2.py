@@ -18,7 +18,6 @@ if __name__ == "__main__":
     parser.add_argument("--compile", dest='compile', action='store_true', help='Compile', default=False)
     parser.add_argument('--save_model', action='store_true', help='Save model checkpoints (enabled by default)')
     parser.add_argument('--no-save_model', dest='save_model', action='store_false', help='Disable model checkpoint saving')
-    parser.add_argument('--case', type=int, choices=[1, 2], default=1, help='Case 1 or 2')
     parser.add_argument('--num_samples', type=int, default=500, help='Number of samples')
     parser.add_argument("--save_frequency", default=50, help='Save model')
     parser.add_argument("--TVD", dest='TVD', action='store_true', help='Compile', default=False)
@@ -27,6 +26,12 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     device = get_device(args.device)
+    args.pre_trained_path = args.pre_trained_path.replace("SOD_shock_tube/", "")
+    print(args.pre_trained_path)
+    case_part = args.pre_trained_path.split('/')[1]
+    case_number = ''.join(filter(str.isdigit, case_part))
+    args.case = int(case_number)
+    print(args.case)
 
     with open("Sod_cases_param.yml", 'r') as stream:
         config = yaml.safe_load(stream)
@@ -82,9 +87,22 @@ if __name__ == "__main__":
         print("Model compiled.")
 
     if args.pre_trained_path:
-        checkpoint = torch.load(args.pre_trained_path)
-        model.load_state_dict(checkpoint)
+        if args.compile:
+            checkpoint = torch.load(args.pre_trained_path)
+            model.load_state_dict(checkpoint)
+        elif not args.compile:
+            checkpoint = torch.load(args.pre_trained_path)
+            new_state_dict = {}
+
+            for k, v in checkpoint.items():
+                if k.startswith("_orig_mod."):
+                    new_k = k.replace("_orig_mod.", "")
+                    new_state_dict[new_k] = v
+                else:
+                    new_state_dict[k] = v
+            model.load_state_dict(new_state_dict)
         print(f"Pre-trained model loaded from {args.pre_trained_path}")
+
 
     optimizer = dispatch_optimizer(model=model,
                                     lr=param_training["stage2"]["lr"],
