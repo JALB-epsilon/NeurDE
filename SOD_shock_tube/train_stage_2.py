@@ -17,7 +17,7 @@ if __name__ == "__main__":
     parser.add_argument('--device', type=int, default=3, help='Device index')
     parser.add_argument("--compile", dest='compile', action='store_true', help='Compile', default=False)
     parser.add_argument('--save_model', action='store_true', help='Save model checkpoints (enabled by default)')
-    parser.add_argument('--no-save_model', dest='save_model', action='store_false', help='Disable model checkpoint saving')
+    parser.add_argument('--no_save_model', dest='save_model', action='store_false', help='Disable model checkpoint saving')
     parser.add_argument('--num_samples', type=int, default=500, help='Number of samples')
     parser.add_argument("--save_frequency", default=50, help='Save model')
     parser.add_argument("--TVD", dest='TVD', action='store_true', help='Compile', default=False)
@@ -148,7 +148,7 @@ if __name__ == "__main__":
             G_seq = G_seq.to(device)
             Fi0 = F_seq[0, 0, ...]
             Gi0 = G_seq[0, 0, ...]
-            tvd_weight = tvd_weight_scheduler(epoch, epochs, initial_weight=1.0, final_weight=10.0) # Adjust initial and final weight as needed
+            tvd_weight = tvd_weight_scheduler(epoch, epochs, initial_weight=1.0, final_weight=10.0)
 
             for rollout in range(number_of_rollout):       
                 rho, ux, uy, E = sod_solver.get_macroscopic(Fi0, Gi0)
@@ -209,7 +209,7 @@ if __name__ == "__main__":
         torch.save(model.state_dict(), last_model_path)
         print(f"Last model saved to: {last_model_path}")
 
-    if not args.save_model:
+    if args.no_save_model:
         print("Model saving disabled.")
 
     print("Training complete.")
