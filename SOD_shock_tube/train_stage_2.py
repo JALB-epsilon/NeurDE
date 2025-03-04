@@ -21,6 +21,7 @@ if __name__ == "__main__":
     parser.add_argument('--case', type=int, choices=[1, 2], default=1, help='Case 1 or 2')
     parser.add_argument('--num_samples', type=int, default=500, help='Number of samples')
     parser.add_argument("--save_frequency", default=50, help='Save model')
+    parser.add_argument("--TVD", dest='TVD', action='store_true', help='Compile', default=False)
     parser.add_argument("--pre_trained_path", type=str, default=None)
     parser.set_defaults(save_model=True)
     args = parser.parse_args()
@@ -76,6 +77,8 @@ if __name__ == "__main__":
         sod_solver.streaming = torch.compile(sod_solver.streaming, dynamic=True, fullgraph=False)
         sod_solver.shift_operator = torch.compile(sod_solver.shift_operator, dynamic=True, fullgraph=False)
         sod_solver.get_macroscopic = torch.compile(sod_solver.get_macroscopic, dynamic=True, fullgraph=False)
+        sod_solver.get_Feq = torch.compile(sod_solver.get_Feq, dynamic=True, fullgraph=False)
+        sod_solver.get_temp_from_energy = torch.compile(sod_solver.get_temp_from_energy, dynamic=True, fullgraph=False)
         print("Model compiled.")
 
     if args.pre_trained_path:
@@ -91,7 +94,7 @@ if __name__ == "__main__":
     scheduler_type = param_training["stage2"]["scheduler"]
     scheduler_config = param_training["stage2"].get("scheduler_config", {}).get(scheduler_type, {})
     scheduler = get_scheduler(optimizer, scheduler_type, total_steps, scheduler_config)
-
+    
     Uax, Uay = case_params["Uax"], case_params["Uay"]
     basis = create_basis(Uax, Uay, device)
 
@@ -114,6 +117,9 @@ if __name__ == "__main__":
     Fi0 = Fi0[0, 0, ...].to(device)
     Gi0 = Gi0[0, 0, ...].to(device)
 
+    if args.TVD:
+        print("Using TVD")
+
     for epoch in tqdm(range(epochs), desc="Epochs"):
         loss_epoch = 0
         for batch_idx, (F_seq, G_seq, Feq_seq, Geq_seq) in enumerate(dataloader):
@@ -122,10 +128,14 @@ if __name__ == "__main__":
             total_loss = 0
             F_seq = F_seq.to(device)
             G_seq = G_seq.to(device)
-            Fi0 = F_seq[0, 0, ...].to(device)
-            Gi0 = G_seq[0, 0, ...].to(device)
+            Fi0 = F_seq[0, 0, ...]
+            Gi0 = G_seq[0, 0, ...]
+            tvd_weight = tvd_weight_scheduler(epoch, epochs, initial_weight=1.0, final_weight=10.0) # Adjust initial and final weight as needed
+
             for rollout in range(number_of_rollout):       
                 rho, ux, uy, E = sod_solver.get_macroscopic(Fi0, Gi0)
+                if args.TVD:
+                    ux_old = ux.clone()
                 T = sod_solver.get_temp_from_energy(ux, uy, E)
                 Feq = sod_solver.get_Feq(rho, ux, uy, T)
                 inputs = torch.stack([rho.unsqueeze(0), ux.unsqueeze(0), uy.unsqueeze(0), T.unsqueeze(0)], dim=1).to(device)
@@ -133,11 +143,13 @@ if __name__ == "__main__":
                 Geq_target = Geq_seq[0, rollout].to(device)
                 inner_loss = loss_func(Geq_pred, Geq_target.permute(1, 2, 0).reshape(-1, 9))
                 total_loss += inner_loss
-                Fi0, Gi0 = sod_solver.collision(Fi0, Gi0, Feq, Geq_pred.permute(1, 0).reshape(9, sod_solver.Y, sod_solver.X), rho, ux, uy, T)
+                if args.TVD:
+                    loss_TVD = TVD_norm(ux, ux_old)
+                    total_loss += tvd_weight*loss_TVD
+                Fi0, Gi0 = sod_solver.collision(Fi0, Gi0, Feq, Geq_pred.permute(1, 0).reshape(sod_solver.Qn, sod_solver.Y, sod_solver.X), rho, ux, uy, T)
                 Fi, Gi = sod_solver.streaming(Fi0, Gi0)
                 Fi0 = Fi
                 Gi0 = Gi
-
             total_loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
@@ -183,116 +195,3 @@ if __name__ == "__main__":
         print("Model saving disabled.")
 
     print("Training complete.")
-
-    
-'''import torch
-import torch.nn as nn
-from architectures import NeurDE
-from utilities import set_seed, get_device, load_equilibrium_state, dispatch_optimizer, calculate_relative_error
-import argparse
-import yaml
-from tqdm import tqdm
-import os
-from torch.utils.data import Dataset, DataLoader
-
-def create_basis(Uax, Uay, device):
-    ex_values = [1, 0, -1, 0, 1, -1, -1, 1, 0]
-    ey_values = [0, 1, 0, -1, 1, 1, -1, -1, 0]
-    ex = torch.tensor(ex_values, dtype=torch.float32) + Uax
-    ey = torch.tensor(ey_values, dtype=torch.float32) + Uay
-    basis = torch.stack([ex, ey], dim=-1).to(device)
-    return basis
-
-class SodDataset(Dataset):
-    def __init__(self, rho, ux, uy, T, Geq):
-        self.rho = torch.tensor(rho, dtype=torch.float32)
-        self.ux = torch.tensor(ux, dtype=torch.float32)
-        self.uy = torch.tensor(uy, dtype=torch.float32)
-        self.T = torch.tensor(T, dtype=torch.float32)
-        self.Geq = torch.tensor(Geq, dtype=torch.float32)
-
-    def __len__(self):
-        return len(self.rho)
-
-    def __getitem__(self, idx):
-        return self.rho[idx], self.ux[idx], self.uy[idx], self.T[idx], self.Geq[idx]
-
-if __name__ == "__main__":
-    set_seed(0)
-
-    parser = argparse.ArgumentParser(description='Train Stage 1')
-    parser.add_argument('--device', type=int, default=3, help='Device index')
-    parser.add_argument("--compile", dest='compile', action='store_true', help='Compile', default=False)
-    parser.add_argument('--save_model', type=bool, default=True, help='Save model')
-    parser.add_argument('--case', type=int, choices=[1, 2], default=1, help='Case 1 or 2')
-    parser.add_argument('--no-save_model', dest='save_model', action='store_false')
-    parser.add_argument('--num_samples', type=int, default=500, help='Number of samples')
-    parser.add_argument("--batch_size", type=int, default=32, help='Batch size')
-    parser.set_defaults(save_model=True)
-
-    args = parser.parse_args()
-    device = get_device(args.device)
-
-    with open("Sod_cases_param.yml", 'r') as stream:
-        config = yaml.safe_load(stream)
-    case_params = config[args.case]
-    case_params['device'] = device
-
-    with open("Sod_cases_param _training.yml", 'r') as stream:
-        training_config = yaml.safe_load(stream)
-    param_training = training_config[args.case]
-
-    os.makedirs(param_training["stage2"]["model_dir"], exist_ok=True)
-    all_rho, all_ux, all_uy, all_T, all_Geq = load_equilibrium_state(param_training["data_dir"])
-
-    dataset = SodDataset(all_rho[:args.num_samples], all_ux[:args.num_samples], all_uy[:args.num_samples], all_T[:args.num_samples], all_Geq[:args.num_samples])
-    dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True, num_workers=4, pin_memory=True)
-
-    model = NeurDE(
-        alpha_layer=[4] + [param_training["hidden_dim"]] * param_training["num_layers"],
-        branch_layer=[2] + [param_training["hidden_dim"]] * param_training["num_layers"],
-        activation='relu'
-    ).to(device)
-
-    if args.compile:
-        model = torch.compile(model)
-
-    optimizer = dispatch_optimizer(model=model, 
-                                   lr=param_training["stage2"]["lr"], 
-                                   optimizer_type="AdamW")
-    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=param_training["stage2"]["step_size"], gamma=param_training["stage2"]["gamma"])
-
-    Uax, Uay = case_params["Uax"], case_params["Uay"]
-    basis = create_basis(Uax, Uay, device)
-
-    epochs = param_training["stage2"]["epochs"]
-    loss_func = calculate_relative_error
-
-    print(f"Training Case {args.case} on {device}. Epochs: {epochs}, Samples: {args.num_samples}")
-    if args.compile:
-        print("Model compiled.")
-
-    for epoch in tqdm(range(epochs), desc="Epochs"):
-        loss_epoch = 0
-        for rho_batch, ux_batch, uy_batch, T_batch, Geq_batch in dataloader:
-            input_data = torch.stack([rho_batch, ux_batch, uy_batch, T_batch], dim=1).to(device)
-            targets = Geq_batch.permute(0, 2, 3, 1).reshape(-1, 9).to(device)
-            optimizer.zero_grad()
-            Geq_pred = model(input_data, basis)
-            loss = loss_func(Geq_pred, targets)
-            loss.backward()
-            optimizer.step()
-            loss_epoch += loss.item()
-
-        if epoch % 100 == 0:
-            print(f"Epoch: {epoch}, Loss: {loss.item():.6f}")
-
-        scheduler.step()
-
-    if args.save_model:
-        if epoch % 20 == 0:
-            save_path = os.path.join(param_training["stage2"]["model_dir"], f"model_{args.case}_epoch_{epoch}.pt")
-            torch.save(model.state_dict(), save_path)
-            print(f"Model saved to: {save_path}")
-
-    print("Training complete.")'''
