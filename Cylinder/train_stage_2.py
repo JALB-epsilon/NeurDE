@@ -7,7 +7,7 @@ from tqdm import tqdm
 import os
 from torch.utils.data import DataLoader
 from train_stage_1 import create_basis
-from SOD_solver import SODSolver
+from cylinder_solver import Cylinder_base
 import torch.nn as nn
 
 if __name__ == "__main__":
@@ -26,37 +26,33 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     device = get_device(args.device)
-    args.pre_trained_path = args.pre_trained_path.replace("SOD_shock_tube/", "")
+    args.pre_trained_path = args.pre_trained_path.replace("Cylinder/", "")
     print(args.pre_trained_path)
-    case_part = args.pre_trained_path.split('/')[1]
-    case_number = ''.join(filter(str.isdigit, case_part))
-    args.case = int(case_number)
-    print(args.case)
 
-    with open("Sod_cases_param.yml", 'r') as stream:
-        config = yaml.safe_load(stream)
-    case_params = config[args.case]
+
+    with open("cylinder_param.yml", 'r') as stream:
+        case_params = yaml.safe_load(stream)
     case_params['device'] = device
 
-    print(f"Case {args.case}: SOD shock tube problem")
+    cylinder_solver = Cylinder_base(
+                                    X=case_params['X'],
+                                    Y=case_params['Y'],
+                                    Qn=case_params['Qn'],
+                                    radius=case_params['radius'],
+                                    Ma0=case_params['Ma0'],
+                                    Re=case_params['Re'],
+                                    rho0=case_params['rho0'],
+                                    T0=case_params['T0'],
+                                    alpha1=case_params['alpha1'],
+                                    alpha01=case_params['alpha01'],
+                                    vuy=case_params['vuy'],
+                                    Pr=case_params['Pr'],
+                                    Ns=case_params['Ns'],
+                                    device=device
+                                    )
 
-    sod_solver = SODSolver(
-        X=case_params['X'],
-        Y=case_params['Y'],
-        Qn=case_params['Qn'],
-        alpha1=case_params['alpha1'],
-        alpha01=case_params['alpha01'],
-        vuy=case_params['vuy'],
-        Pr=case_params['Pr'],
-        muy=case_params['muy'],
-        Uax=case_params['Uax'],
-        Uay=case_params['Uay'],
-        device=case_params['device']
-    )
-
-    with open("Sod_cases_param_training.yml", 'r') as stream:
-        training_config = yaml.safe_load(stream)
-    param_training = training_config[args.case]
+    with open("cylinder_param_training.yml", 'r') as stream:
+        param_training = yaml.safe_load(stream)
     number_of_rollout = param_training["stage2"]["N"]
 
     os.makedirs(param_training["stage2"]["model_dir"], exist_ok=True)
@@ -78,12 +74,12 @@ if __name__ == "__main__":
 
     if args.compile:
         model = torch.compile(model)
-        sod_solver.collision = torch.compile(sod_solver.collision, dynamic=True, fullgraph=False)
-        sod_solver.streaming = torch.compile(sod_solver.streaming, dynamic=True, fullgraph=False)
-        sod_solver.shift_operator = torch.compile(sod_solver.shift_operator, dynamic=True, fullgraph=False)
-        sod_solver.get_macroscopic = torch.compile(sod_solver.get_macroscopic, dynamic=True, fullgraph=False)
-        sod_solver.get_Feq = torch.compile(sod_solver.get_Feq, dynamic=True, fullgraph=False)
-        sod_solver.get_temp_from_energy = torch.compile(sod_solver.get_temp_from_energy, dynamic=True, fullgraph=False)
+        cylinder_solver.collision = torch.compile(cylinder_solver.collision, dynamic=True, fullgraph=False)
+        cylinder_solver.streaming = torch.compile(cylinder_solver.streaming, dynamic=True, fullgraph=False)
+        cylinder_solver.shift_operator = torch.compile(cylinder_solver.shift_operator, dynamic=True, fullgraph=False)
+        cylinder_solver.get_macroscopic = torch.compile(cylinder_solver.get_macroscopic, dynamic=True, fullgraph=False)
+        cylinder_solver.get_Feq = torch.compile(cylinder_solver.get_Feq, dynamic=True, fullgraph=False)
+        cylinder_solver.get_temp_from_energy = torch.compile(cylinder_solver.get_temp_from_energy, dynamic=True, fullgraph=False)
         print("Model compiled.")
 
     if args.pre_trained_path:
@@ -113,13 +109,16 @@ if __name__ == "__main__":
     scheduler_config = param_training["stage2"].get("scheduler_config", {}).get(scheduler_type, {})
     scheduler = get_scheduler(optimizer, scheduler_type, total_steps, scheduler_config)
     
-    Uax, Uay = case_params["Uax"], case_params["Uay"]
+    cs0 = np.sqrt(case_params["vuy"]*case_params["T0"])
+    U0 = case_params["Ma0"] * cs0
+    Uax = U0 * case_params["Ns"]
+    Uay = 0
     basis = create_basis(Uax, Uay, device)
 
     epochs = param_training["stage2"]["epochs"]
     loss_func = calculate_relative_error
 
-    print(f"Training Case {args.case} on {device}. Epochs: {epochs}, Samples: {args.num_samples}")
+    print(f"Training Case Cylinder on {device}. Epochs: {epochs}, Samples: {args.num_samples}")
 
     best_losses = [float('inf')] * 3
     best_models = [None] * 3
@@ -151,11 +150,11 @@ if __name__ == "__main__":
             tvd_weight = tvd_weight_scheduler(epoch, epochs, initial_weight=1.0, final_weight=10.0)
 
             for rollout in range(number_of_rollout):       
-                rho, ux, uy, E = sod_solver.get_macroscopic(Fi0, Gi0)
+                rho, ux, uy, E = cylinder_solver.get_macroscopic(Fi0, Gi0)
                 if args.TVD:
                     ux_old = ux.clone()
-                T = sod_solver.get_temp_from_energy(ux, uy, E)
-                Feq = sod_solver.get_Feq(rho, ux, uy, T)
+                T = cylinder_solver.get_temp_from_energy(ux, uy, E)
+                Feq = cylinder_solver.get_Feq(rho, ux, uy, T)
                 inputs = torch.stack([rho.unsqueeze(0), ux.unsqueeze(0), uy.unsqueeze(0), T.unsqueeze(0)], dim=1).to(device)
                 Geq_pred = model(inputs, basis)
                 Geq_target = Geq_seq[0, rollout].to(device)
@@ -164,10 +163,34 @@ if __name__ == "__main__":
                 if args.TVD:
                     loss_TVD = TVD_norm(ux, ux_old)
                     total_loss += tvd_weight*loss_TVD
-                Fi0, Gi0 = sod_solver.collision(Fi0, Gi0, Feq, Geq_pred.permute(1, 0).reshape(sod_solver.Qn, sod_solver.Y, sod_solver.X), rho, ux, uy, T)
-                Fi, Gi = sod_solver.streaming(Fi0, Gi0)
-                Fi0 = Fi
-                Gi0 = Gi
+                Fi0, Gi0 = cylinder_solver.collision(Fi0, Gi0, Feq, Geq_pred.permute(1, 0).reshape(cylinder_solver.Qn, cylinder_solver.Y, cylinder_solver.X), rho, ux, uy, T)
+                Fi, Gi = cylinder_solver.streaming(Fi0, Gi0)
+                
+                with torch.no_grad():
+                    khi = detach(torch.zeros_like(ux))
+                    zetax = detach(torch.zeros_like(ux))
+                    zetay = detach(torch.zeros_like(ux))
+
+                    Fi_obs_cyl, Gi_obs_cyl, Fi_obs_Inlet, Gi_obs_Inlet = cylinder_solver.get_obs_distribution(
+                                                ux, 
+                                                uy,
+                                                T,
+                                                rho,
+                                                khi,
+                                                zetax,
+                                                zetay)
+
+                    Fi_new, Gi_new = cylinder_solver.enforce_Obs_and_BC(Fi,
+                                                Gi,
+                                                Fi_obs_cyl,
+                                                Gi_obs_cyl,
+                                                Fi_obs_Inlet,
+                                                Gi_obs_Inlet)
+                    
+                    
+        
+                Fi0 = Fi_new
+                Gi0 = Gi_new
             total_loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()

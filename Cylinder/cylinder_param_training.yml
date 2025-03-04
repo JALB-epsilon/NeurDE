@@ -1,0 +1,25 @@
+hidden_dim: 64
+num_layers: 4
+data_dir: data_base/cylinder_case.h5
+stage1:
+  epochs: 1000
+  lr: 0.0001
+  model_dir: results/stage1
+  scheduler: CosineAnnealingWarmRestarts
+  scheduler_config:
+    CosineAnnealingWarmRestarts:
+      T_0: 500 
+      T_mult: 2
+      eta_min: 0.000005
+stage2:
+  epochs: 1000
+  lr: 0.0001
+  model_dir: results/stage2
+  scheduler: OneCycleLR
+  N: 25
+  scheduler_config:
+    OneCycleLR:
+      max_lr: 0.0005  
+      pct_start: 0.3
+      div_factor: 10
+      final_div_factor: 100
