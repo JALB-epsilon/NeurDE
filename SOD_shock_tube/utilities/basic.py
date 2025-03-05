@@ -118,7 +118,7 @@ class RolloutBatchDataset(Dataset):
         return self.num_sequences
 
     def __getitem__(self, idx):
-        Fi_sequence = torch.tensor(self.all_Fi[idx:idx + self.number_of_rollout]).float()
+        Fi_sequence = torch.tensor(self.all_Fi[idx:idx + self.number_of_rollout]).float() # should be +1?
         Gi_sequence = torch.tensor(self.all_Gi[idx:idx + self.number_of_rollout]).float()
         Feq_targets = torch.tensor(self.all_Feq[idx:idx + self.number_of_rollout]).float()
         Geq_targets = torch.tensor(self.all_Geq[idx:idx + self.number_of_rollout]).float()

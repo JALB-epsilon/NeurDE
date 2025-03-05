@@ -37,11 +37,12 @@ if __name__ == "__main__":
     case_params = config[args.case]
     case_params['device'] = device
 
-    with open("Sod_cases_param _training.yml", 'r') as stream:
+    with open("Sod_cases_param_training.yml", 'r') as stream:
         training_config = yaml.safe_load(stream)
     param_training = training_config[args.case]
 
-    os.makedirs(param_training["stage1"]["model_dir"], exist_ok=True)
+    os.makedirs(param_training["stage1"]["model_dir"], exist_ok=True) 
+
     all_rho, all_ux, all_uy, all_T, all_Geq = load_equilibrium_state(param_training["data_dir"])
 
     dataset = SodDataset(all_rho[:args.num_samples], all_ux[:args.num_samples], all_uy[:args.num_samples], all_T[:args.num_samples], all_Geq[:args.num_samples])
@@ -111,7 +112,7 @@ if __name__ == "__main__":
             if args.save_model and epochs_since_last_save[max_index] >= save_frequency:
                 if best_model_paths[max_index] and os.path.exists(best_model_paths[max_index]):
                     os.remove(best_model_paths[max_index])
-                save_path = os.path.join(param_training["stage1"]["model_dir"], f"best_model_{args.case}_epoch_{epoch+1}_top_{max_index+1}_loss_{current_loss:.6f}.pt")
+                save_path = os.path.join(param_training["stage1"]["model_dir"], f"best_model_{args.case}_epoch_{epoch+1}_top_{max_index+1}_loss_{current_loss:.3f}.pt")
                 torch.save(best_models[max_index], save_path)
                 print(f"Top {max_index+1} model saved to: {save_path}")
                 best_model_paths[max_index] = save_path
@@ -126,7 +127,7 @@ if __name__ == "__main__":
     # Save the last model with its loss
     if args.save_model:
         last_epoch_loss= current_loss
-        last_model_path = os.path.join(param_training["stage1"]["model_dir"], f"last_model_{args.case}_epoch_{epochs}_loss_{last_epoch_loss:.6f}.pt")
+        last_model_path = os.path.join(param_training["stage1"]["model_dir"], f"last_model_{args.case}_epoch_{epochs}_loss_{last_epoch_loss:.3f}.pt")
         torch.save(model.state_dict(), last_model_path)
         print(f"Last model saved to: {last_model_path}")
 
