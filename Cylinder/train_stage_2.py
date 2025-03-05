@@ -19,7 +19,7 @@ if __name__ == "__main__":
     parser.add_argument('--save_model', action='store_true', help='Save model checkpoints (enabled by default)')
     parser.add_argument('--no_save_model', dest='save_model', action='store_false', help='Disable model checkpoint saving')
     parser.add_argument('--num_samples', type=int, default=500, help='Number of samples')
-    parser.add_argument("--save_frequency", default=25, help='Save model')
+    parser.add_argument("--save_frequency", default=5, help='Save model')
     parser.add_argument("--TVD", dest='TVD', action='store_true', help='Compile', default=False)
     parser.add_argument("--pre_trained_path", type=str, default=None)
     parser.set_defaults(save_model=True)
