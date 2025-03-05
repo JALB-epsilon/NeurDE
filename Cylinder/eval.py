@@ -107,9 +107,12 @@ if __name__ == "__main__":
         all_Fi0 = f["Fi0"][:]
         all_Gi0 = f["Gi0"][:]
 
-    all_Ma_GT = np.sqrt(all_ux ** 2 + all_uy ** 2) / torch.sqrt(all_T*case_params['vuy'])
+    all_Ma_GT = np.sqrt(all_ux ** 2 + all_uy ** 2) / np.sqrt(all_T*case_params['vuy'])
 
-    Uax, Uay = case_params["Uax"], case_params["Uay"]
+    cs0 = np.sqrt(case_params["vuy"]*case_params["T0"])
+    U0 = case_params["Ma0"] * cs0
+    Uax = U0 * case_params["Ns"]
+    Uay = 0
     basis = create_basis(Uax, Uay, device)
    
     loss_func = calculate_relative_error
@@ -121,9 +124,9 @@ if __name__ == "__main__":
     loss=0
     with torch.no_grad():  
             for i in tqdm(range(args.num_samples)):
-                rho, ux, uy, E = Cylinder_base.get_macroscopic(Fi0.squeeze(0), Gi0.squeeze(0))
-                T = Cylinder_base.get_temp_from_energy(ux, uy, E)
-                Feq = Cylinder_base.get_Feq(rho, ux, uy, T)
+                rho, ux, uy, E = cylinder_solver.get_macroscopic(Fi0.squeeze(0), Gi0.squeeze(0))
+                T = cylinder_solver.get_temp_from_energy(ux, uy, E)
+                Feq = cylinder_solver.get_Feq(rho, ux, uy, T)
                 inputs = torch.stack([rho.unsqueeze(0), ux.unsqueeze(0), uy.unsqueeze(0), T.unsqueeze(0)], dim=1).to(device)
                 Geq_pred = model(inputs, basis)
    
@@ -131,13 +134,13 @@ if __name__ == "__main__":
 
                 inner_lose = loss_func(Geq_pred, Geq_target.permute(0, 2, 3, 1).reshape(-1, 9))
                 loss += inner_lose
-                Fi0, Gi0 = Cylinder_base.collision(Fi0.squeeze(0), Gi0.squeeze(0), Feq, Geq_pred.permute(1, 0).reshape(9, Cylinder_base.Y, Cylinder_base.X), rho, ux, uy, T)
-                Fi, Gi = Cylinder_base.streaming(Fi0, Gi0)
+                Fi0, Gi0 = cylinder_solver.collision(Fi0.squeeze(0), Gi0.squeeze(0), Feq, Geq_pred.permute(1, 0).reshape(9, cylinder_solver.Y, cylinder_solver.X), rho, ux, uy, T)
+                Fi, Gi = cylinder_solver.streaming(Fi0, Gi0)
                 Fi0 = Fi
                 Gi0 = Gi
                 
                 #plot the results of the Mach number 
-                Ma_NN = Cylinder_base.get_Ma(Gi0.squeeze(0), Fi0.squeeze(0))
+                Ma_NN = cylinder_solver.get_local_Mach(ux, uy, T)
                 Ma_GT = all_Ma_GT[args.num_samples]
                 plt.figure(figsize=(10, 5))
                 plt.subplot(1, 2, 1)
