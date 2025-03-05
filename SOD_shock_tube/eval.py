@@ -56,7 +56,7 @@ if __name__ == "__main__":
         device=case_params['device']
     )
 
-    with open("Sod_cases_param _training.yml", 'r') as stream:
+    with open("Sod_cases_param_training.yml", 'r') as stream:
         training_config = yaml.safe_load(stream)
     param_training = training_config[args.case]
     number_of_rollout = param_training["stage2"]["N"]

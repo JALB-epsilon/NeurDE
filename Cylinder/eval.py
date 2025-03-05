@@ -77,7 +77,6 @@ if __name__ == "__main__":
         cylinder_solver.shift_operator = torch.compile(cylinder_solver.shift_operator, dynamic=True, fullgraph=False)
         cylinder_solver.get_macroscopic = torch.compile(cylinder_solver.get_macroscopic, dynamic=True, fullgraph=False)
         cylinder_solver.get_Feq = torch.compile(cylinder_solver.get_Feq, dynamic=True, fullgraph=False)
-        cylinder_solver.get_temp_from_energy = torch.compile(cylinder_solver.get_temp_from_energy, dynamic=True, fullgraph=False)
         print("Model compiled.")
 
     if args.trained_path:

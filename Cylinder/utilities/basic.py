@@ -45,35 +45,6 @@ def calculate_relative_error(pred, target):
     return torch.norm(pred - target) / (torch.norm(target)+eps)
 
 
-def TVD_norm(U_new, U_old):
-    """
-    Compute the TVD norm of the difference between two fields.
-    """
-    if U_new.shape != U_old.shape:
-        raise ValueError("Input tensors U_new and U_old must have the same shape.")
-
-    if U_new.ndim < 2:
-        raise ValueError("Input tensors must have at least 2 dimensions.")
-
-    diff_new = U_new[2, 1:] - U_new[2, :-1]
-    diff_old = U_old[2, 1:] - U_old[2, :-1]
-
-    TV_new = torch.abs(diff_new).sum()
-    TV_old = torch.abs(diff_old).sum()
-
-    TVD = F.relu(TV_new - TV_old)
-
-    TVD = torch.where(TVD <= 1e-7, torch.tensor(0.0, device=TVD.device), TVD)
-
-    return TVD
-
-def tvd_weight_scheduler(epoch, total_epochs, initial_weight=1.0, final_weight=10.0):
-    """
-    A scheduler to linearly increase the TVD weight over epochs.
-    """
-    return initial_weight + (final_weight - initial_weight) * (epoch / total_epochs)
-
-
 class CylinderDataset(Dataset):
     def __init__(self, rho, ux, uy, T, Geq):
         self.rho = torch.tensor(rho, dtype=torch.float32)

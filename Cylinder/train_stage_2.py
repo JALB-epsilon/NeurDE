@@ -20,7 +20,6 @@ if __name__ == "__main__":
     parser.add_argument('--no_save_model', dest='save_model', action='store_false', help='Disable model checkpoint saving')
     parser.add_argument('--num_samples', type=int, default=500, help='Number of samples')
     parser.add_argument("--save_frequency", default=5, help='Save model')
-    parser.add_argument("--TVD", dest='TVD', action='store_true', help='Compile', default=False)
     parser.add_argument("--pre_trained_path", type=str, default=None)
     parser.set_defaults(save_model=True)
     args = parser.parse_args()
@@ -134,8 +133,6 @@ if __name__ == "__main__":
     Fi0 = Fi0[0, 0, ...].to(device)
     Gi0 = Gi0[0, 0, ...].to(device)
 
-    if args.TVD:
-        print("Using TVD")
 
     for epoch in tqdm(range(epochs), desc="Epochs"):
         loss_epoch = 0
@@ -147,8 +144,6 @@ if __name__ == "__main__":
             G_seq = G_seq.to(device)
             Fi0 = F_seq[0, 0, ...]
             Gi0 = G_seq[0, 0, ...]
-            tvd_weight = tvd_weight_scheduler(epoch, epochs, initial_weight=1.0, final_weight=10.0)
-
             for rollout in range(number_of_rollout):       
                 rho, ux, uy, E = cylinder_solver.get_macroscopic(Fi0, Gi0)
                 if args.TVD:
@@ -160,9 +155,6 @@ if __name__ == "__main__":
                 Geq_target = Geq_seq[0, rollout].to(device)
                 inner_loss = loss_func(Geq_pred, Geq_target.permute(1, 2, 0).reshape(-1, 9))
                 total_loss += inner_loss
-                if args.TVD:
-                    loss_TVD = TVD_norm(ux, ux_old)
-                    total_loss += tvd_weight*loss_TVD
                 Fi0, Gi0 = cylinder_solver.collision(Fi0, Gi0, Feq, Geq_pred.permute(1, 0).reshape(cylinder_solver.Qn, cylinder_solver.Y, cylinder_solver.X), rho, ux, uy, T)
                 Fi, Gi = cylinder_solver.streaming(Fi0, Gi0)
                 
@@ -191,7 +183,7 @@ if __name__ == "__main__":
         
                 Fi0 = Fi_new
                 Gi0 = Gi_new
-            total_loss.backward()
+            total_loss.backward(retain_graph=True)
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
             loss_epoch += total_loss.item()

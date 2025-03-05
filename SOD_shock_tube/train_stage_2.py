@@ -19,8 +19,8 @@ if __name__ == "__main__":
     parser.add_argument('--save_model', action='store_true', help='Save model checkpoints (enabled by default)')
     parser.add_argument('--no_save_model', dest='save_model', action='store_false', help='Disable model checkpoint saving')
     parser.add_argument('--num_samples', type=int, default=500, help='Number of samples')
-    parser.add_argument("--save_frequency", default=25, help='Save model')
-    parser.add_argument("--TVD", dest='TVD', action='store_true', help='Compile', default=False)
+    parser.add_argument("--save_frequency", default=10, help='Save model')
+    parser.add_argument("--TVD", dest='TVD', action='store_true', help='TVD norm', default=False)
     parser.add_argument("--pre_trained_path", type=str, default=None)
     parser.set_defaults(save_model=True)
     args = parser.parse_args()
@@ -137,9 +137,17 @@ if __name__ == "__main__":
 
     if args.TVD:
         print("Using TVD")
+        if args.compile:
+            TVD_norm = torch.compile(TVD_norm, dynamic=True, fullgraph=False)
 
     for epoch in tqdm(range(epochs), desc="Epochs"):
         loss_epoch = 0
+        if args.TVD and epoch == 0:
+            ux_old = torch.zeros_like(Fi0[1, ...])
+            T_old = torch.zeros_like(Fi0[1, ...])
+            rho_old = torch.zeros_like(Fi0[1, ...])
+            if args.TVD:
+                tvd_weight = tvd_weight_scheduler(epoch, epochs, initial_weight=1e-6, final_weight=1.0)
         for batch_idx, (F_seq, G_seq, Feq_seq, Geq_seq) in enumerate(dataloader):
             optimizer.zero_grad()
             model.train()
@@ -148,12 +156,8 @@ if __name__ == "__main__":
             G_seq = G_seq.to(device)
             Fi0 = F_seq[0, 0, ...]
             Gi0 = G_seq[0, 0, ...]
-            tvd_weight = tvd_weight_scheduler(epoch, epochs, initial_weight=1.0, final_weight=10.0)
-
             for rollout in range(number_of_rollout):       
                 rho, ux, uy, E = sod_solver.get_macroscopic(Fi0, Gi0)
-                if args.TVD:
-                    ux_old = ux.clone()
                 T = sod_solver.get_temp_from_energy(ux, uy, E)
                 Feq = sod_solver.get_Feq(rho, ux, uy, T)
                 inputs = torch.stack([rho.unsqueeze(0), ux.unsqueeze(0), uy.unsqueeze(0), T.unsqueeze(0)], dim=1).to(device)
@@ -161,13 +165,16 @@ if __name__ == "__main__":
                 Geq_target = Geq_seq[0, rollout].to(device)
                 inner_loss = loss_func(Geq_pred, Geq_target.permute(1, 2, 0).reshape(-1, 9))
                 total_loss += inner_loss
-                if args.TVD:
-                    loss_TVD = TVD_norm(ux, ux_old)
+                if args.TVD and rollout > 0:
+                    loss_TVD = TVD_norm(ux, ux_old)+TVD_norm(T, T_old)+TVD_norm(rho, rho_old)
+                    ux_old = ux.clone()
+                    T_old = T.clone()
+                    rho_old = rho.clone()
                     total_loss += tvd_weight*loss_TVD
                 Fi0, Gi0 = sod_solver.collision(Fi0, Gi0, Feq, Geq_pred.permute(1, 0).reshape(sod_solver.Qn, sod_solver.Y, sod_solver.X), rho, ux, uy, T)
                 Fi, Gi = sod_solver.streaming(Fi0, Gi0)
-                Fi0 = Fi
-                Gi0 = Gi
+                Fi0 = Fi.detach()
+                Gi0 = Gi.detach()
             total_loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
