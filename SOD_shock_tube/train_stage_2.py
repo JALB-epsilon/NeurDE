@@ -142,12 +142,12 @@ if __name__ == "__main__":
 
     for epoch in tqdm(range(epochs), desc="Epochs"):
         loss_epoch = 0
-        if args.TVD and epoch == 0:
+        if args.TVD:
             ux_old = torch.zeros_like(Fi0[1, ...])
             T_old = torch.zeros_like(Fi0[1, ...])
             rho_old = torch.zeros_like(Fi0[1, ...])
             if args.TVD:
-                tvd_weight = tvd_weight_scheduler(epoch, epochs, initial_weight=1e-6, final_weight=1.0)
+                tvd_weight = tvd_weight_scheduler(epoch, epochs, initial_weight=1e-8, final_weight=1.0)
         for batch_idx, (F_seq, G_seq, Feq_seq, Geq_seq) in enumerate(dataloader):
             optimizer.zero_grad()
             model.train()
@@ -182,7 +182,6 @@ if __name__ == "__main__":
             print(f"Epoch: {epoch}, Batch ID: {batch_idx}, Loss: {total_loss.item()/number_of_rollout:.6f}")
 
         scheduler.step()
-
 
         if epoch % 100 == 0:
             print(f"Epoch: {epoch}, Loss: {loss_epoch/len(dataloader):.6f}")
