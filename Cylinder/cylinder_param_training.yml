@@ -12,11 +12,11 @@ stage1:
       T_mult: 2
       eta_min: 0.000005
 stage2:
-  epochs: 1000
+  epochs: 500
   lr: 0.0001
   model_dir: results/stage2
   scheduler: OneCycleLR
-  N: 25
+  N: 10
   scheduler_config:
     OneCycleLR:
       max_lr: 0.0005  

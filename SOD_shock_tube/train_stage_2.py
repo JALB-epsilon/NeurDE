@@ -19,19 +19,23 @@ if __name__ == "__main__":
     parser.add_argument('--save_model', action='store_true', help='Save model checkpoints (enabled by default)')
     parser.add_argument('--no_save_model', dest='save_model', action='store_false', help='Disable model checkpoint saving')
     parser.add_argument('--num_samples', type=int, default=500, help='Number of samples')
-    parser.add_argument("--save_frequency", default=10, help='Save model')
+    parser.add_argument("--save_frequency", default=1, help='Save model')
     parser.add_argument("--TVD", dest='TVD', action='store_true', help='TVD norm', default=False)
     parser.add_argument("--pre_trained_path", type=str, default=None)
     parser.set_defaults(save_model=True)
     args = parser.parse_args()
 
     device = get_device(args.device)
-    args.pre_trained_path = args.pre_trained_path.replace("SOD_shock_tube/", "")
-    print(args.pre_trained_path)
-    case_part = args.pre_trained_path.split('/')[1]
-    case_number = ''.join(filter(str.isdigit, case_part))
-    args.case = int(case_number)
-    print(args.case)
+    if args.pre_trained_path:
+        args.pre_trained_path = args.pre_trained_path.replace("SOD_shock_tube/", "")
+        print(args.pre_trained_path)
+        case_part = args.pre_trained_path.split('/')[1]
+        case_number = ''.join(filter(str.isdigit, case_part))
+        args.case = int(case_number)
+        print(args.case)
+
+    else: 
+        args.case = 1
 
     with open("Sod_cases_param.yml", 'r') as stream:
         config = yaml.safe_load(stream)
@@ -70,6 +74,12 @@ if __name__ == "__main__":
 
     dataloader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=4, pin_memory=True)  # batch size 1 to get each sequence.
 
+ 
+    val_dataset = SodDataset_stage2(F = all_F[args.num_samples:args.num_samples+2*number_of_rollout],
+                                    G=all_G[args.num_samples:args.num_samples+2*number_of_rollout],
+                                    Feq=all_Feq[args.num_samples:args.num_samples+2*number_of_rollout],
+                                    Geq=all_Geq[args.num_samples:args.num_samples+2*number_of_rollout],)
+    
     model = NeurDE(
         alpha_layer=[4] + [param_training["hidden_dim"]] * param_training["num_layers"],
         branch_layer=[2] + [param_training["hidden_dim"]] * param_training["num_layers"],
@@ -139,7 +149,7 @@ if __name__ == "__main__":
         print("Using TVD")
         if args.compile:
             TVD_norm = torch.compile(TVD_norm, dynamic=True, fullgraph=False)
-
+    current_loss = 0.0
     for epoch in tqdm(range(epochs), desc="Epochs"):
         loss_epoch = 0
         if args.TVD:
@@ -147,7 +157,7 @@ if __name__ == "__main__":
             T_old = torch.zeros_like(Fi0[1, ...])
             rho_old = torch.zeros_like(Fi0[1, ...])
             if args.TVD:
-                tvd_weight = tvd_weight_scheduler(epoch, epochs, initial_weight=1e-8, final_weight=1.0)
+                tvd_weight = tvd_weight_scheduler(epoch, epochs, initial_weight=1e-8, final_weight=1e-4)
         for batch_idx, (F_seq, G_seq, Feq_seq, Geq_seq) in enumerate(dataloader):
             optimizer.zero_grad()
             model.train()
@@ -187,16 +197,40 @@ if __name__ == "__main__":
             print(f"Epoch: {epoch}, Loss: {loss_epoch/len(dataloader):.6f}")
 
         current_loss = loss_epoch / len(dataloader)
+        
+        model.eval()
+        val_loss = 0.0
+        with torch.no_grad():
+            Fi0 = next(iter(val_dataset))[0].to(device)
+            Gi0 = next(iter(val_dataset))[1].to(device)
+            
+            for F_val, G_val, Feq_val, Geq_val in val_dataset:
+                rho, ux, uy, E = sod_solver.get_macroscopic(Fi0, Gi0)
+                T = sod_solver.get_temp_from_energy(ux, uy, E)
+                Feq = sod_solver.get_Feq(rho, ux, uy, T)
+                inputs = torch.stack([rho.unsqueeze(0), ux.unsqueeze(0), uy.unsqueeze(0), T.unsqueeze(0)], dim=1).to(device)
+                Geq_pred = model(inputs, basis)
+                Geq_target = Geq_val.to(device)
+                inner_loss = loss_func(Geq_pred, Geq_target.permute(1, 2, 0).reshape(-1, 9))
+                val_loss += inner_loss
+                Fi0, Gi0 = sod_solver.collision(Fi0, Gi0, Feq, Geq_pred.permute(1, 0).reshape(sod_solver.Qn, sod_solver.Y, sod_solver.X), rho, ux, uy, T)
+                Fi, Gi = sod_solver.streaming(Fi0, Gi0)
+                Fi0 = Fi.detach()
+                Gi0 = Gi.detach()
+            val_loss /= len(val_dataset)
+            print("-" * 50)
+            print(f"Validation Loss: {val_loss:.6f}")
+            print("-" * 50)
 
-        if current_loss < max(best_losses):
+        if val_loss < max(best_losses):
             max_index = best_losses.index(max(best_losses))
-            best_losses[max_index] = current_loss
+            best_losses[max_index] = val_loss
             best_models[max_index] = model.state_dict()
 
             if args.save_model and epochs_since_last_save[max_index] >= save_frequency:
                 if best_model_paths[max_index] and os.path.exists(best_model_paths[max_index]):
                     os.remove(best_model_paths[max_index])
-                save_path = os.path.join(param_training["stage2"]["model_dir"], f"best_model_{args.case}_epoch_{epoch+1}_top_{max_index+1}_loss_{current_loss:.6f}.pt")
+                save_path = os.path.join(param_training["stage2"]["model_dir"], f"best_model_{args.case}_epoch_{epoch+1}_top_{max_index+1}_val_loss_{val_loss:.6f}.pt")
                 torch.save(best_models[max_index], save_path)
                 print(f"Top {max_index+1} model saved to: {save_path}")
                 best_model_paths[max_index] = save_path

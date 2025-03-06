@@ -19,7 +19,7 @@ if __name__ == "__main__":
     parser.add_argument('--save_model', action='store_true', help='Save model checkpoints (enabled by default)')
     parser.add_argument('--no_save_model', dest='save_model', action='store_false', help='Disable model checkpoint saving')
     parser.add_argument('--num_samples', type=int, default=500, help='Number of samples')
-    parser.add_argument("--save_frequency", default=5, help='Save model')
+    parser.add_argument("--save_frequency", default=1, help='Save model')
     parser.add_argument("--pre_trained_path", type=str, default=None)
     parser.set_defaults(save_model=True)
     args = parser.parse_args()
@@ -64,6 +64,10 @@ if __name__ == "__main__":
                                     )
 
     dataloader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=4, pin_memory=True)  # batch size 1 to get each sequence.
+    val_dataset = Cylinder_stage2(F = all_F[args.num_samples:args.num_samples+2*number_of_rollout],
+                                    G=all_G[args.num_samples:args.num_samples+2*number_of_rollout],
+                                    Feq=all_Feq[args.num_samples:args.num_samples+2*number_of_rollout],
+                                    Geq=all_Geq[args.num_samples:args.num_samples+2*number_of_rollout],)
 
     model = NeurDE(
         alpha_layer=[4] + [param_training["hidden_dim"]] * param_training["num_layers"],
@@ -146,8 +150,6 @@ if __name__ == "__main__":
             Gi0 = G_seq[0, 0, ...]
             for rollout in range(number_of_rollout):       
                 rho, ux, uy, E = cylinder_solver.get_macroscopic(Fi0, Gi0)
-                if args.TVD:
-                    ux_old = ux.clone()
                 T = cylinder_solver.get_temp_from_energy(ux, uy, E)
                 Feq = cylinder_solver.get_Feq(rho, ux, uy, T)
                 inputs = torch.stack([rho.unsqueeze(0), ux.unsqueeze(0), uy.unsqueeze(0), T.unsqueeze(0)], dim=1).to(device)
@@ -181,8 +183,8 @@ if __name__ == "__main__":
                     
                     
         
-                Fi0 = Fi_new
-                Gi0 = Gi_new
+                Fi0 = Fi_new.clone()
+                Gi0 = Gi_new.clone()
             total_loss.backward(retain_graph=True)
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
@@ -196,16 +198,61 @@ if __name__ == "__main__":
             print(f"Epoch: {epoch}, Loss: {loss_epoch/len(dataloader):.6f}")
 
         current_loss = loss_epoch / len(dataloader)
+        
+        model.eval()
+        val_loss = 0.0
+        with torch.no_grad():
+            Fi0 = next(iter(val_dataset))[0].to(device)
+            Gi0 = next(iter(val_dataset))[1].to(device)
+            
+            for F_val, G_val, Feq_val, Geq_val in val_dataset:
+                rho, ux, uy, E = cylinder_solver.get_macroscopic(Fi0, Gi0)
+                T = cylinder_solver.get_temp_from_energy(ux, uy, E)
+                Feq = cylinder_solver.get_Feq(rho, ux, uy, T)
+                inputs = torch.stack([rho.unsqueeze(0), ux.unsqueeze(0), uy.unsqueeze(0), T.unsqueeze(0)], dim=1).to(device)
+                Geq_pred = model(inputs, basis)
+                Geq_target = Geq_seq[0, rollout].to(device)
+                inner_loss = loss_func(Geq_pred, Geq_target.permute(1, 2, 0).reshape(-1, 9))
+                total_loss += inner_loss
+                Fi0, Gi0 = cylinder_solver.collision(Fi0, Gi0, Feq, Geq_pred.permute(1, 0).reshape(cylinder_solver.Qn, cylinder_solver.Y, cylinder_solver.X), rho, ux, uy, T)
+                Fi, Gi = cylinder_solver.streaming(Fi0, Gi0)
+                khi = detach(torch.zeros_like(ux))
+                zetax = detach(torch.zeros_like(ux))
+                zetay = detach(torch.zeros_like(ux))
 
-        if current_loss < max(best_losses):
+                Fi_obs_cyl, Gi_obs_cyl, Fi_obs_Inlet, Gi_obs_Inlet = cylinder_solver.get_obs_distribution(
+                                            ux, 
+                                            uy,
+                                            T,
+                                            rho,
+                                            khi,
+                                            zetax,
+                                            zetay)
+
+                Fi_new, Gi_new = cylinder_solver.enforce_Obs_and_BC(Fi,
+                                            Gi,
+                                            Fi_obs_cyl,
+                                            Gi_obs_cyl,
+                                            Fi_obs_Inlet,
+                                            Gi_obs_Inlet)
+                
+
+                Fi0 = Fi_new
+                Gi0 = Gi_new
+            val_loss /= len(val_dataset)
+            print("-" * 50)
+            print(f"Validation Loss: {val_loss:.6f}")
+            print("-" * 50)
+
+        if val_loss < max(best_losses):
             max_index = best_losses.index(max(best_losses))
-            best_losses[max_index] = current_loss
+            best_losses[max_index] = val_loss
             best_models[max_index] = model.state_dict()
 
             if args.save_model and epochs_since_last_save[max_index] >= save_frequency:
                 if best_model_paths[max_index] and os.path.exists(best_model_paths[max_index]):
                     os.remove(best_model_paths[max_index])
-                save_path = os.path.join(param_training["stage2"]["model_dir"], f"best_model_{args.case}_epoch_{epoch+1}_top_{max_index+1}_loss_{current_loss:.6f}.pt")
+                save_path = os.path.join(param_training["stage2"]["model_dir"], f"best_model_{args.case}_epoch_{epoch+1}_top_{max_index+1}_val_loss_{val_loss:.6f}.pt")
                 torch.save(best_models[max_index], save_path)
                 print(f"Top {max_index+1} model saved to: {save_path}")
                 best_model_paths[max_index] = save_path
@@ -217,10 +264,11 @@ if __name__ == "__main__":
             for i in range(3):
                 epochs_since_last_save[i] += 1
 
+
     # Save the last model with its loss
     if args.save_model:
         last_epoch_loss = current_loss
-        last_model_path = os.path.join(param_training["stage2"]["model_dir"], f"last_model_{args.case}_epoch_{epochs}_loss_{last_epoch_loss:.6f}.pt")
+        last_model_path = os.path.join(param_training["stage2"]["model_dir"], f"last_model_epoch_{epochs}_loss_{last_epoch_loss:.6f}.pt")
         torch.save(model.state_dict(), last_model_path)
         print(f"Last model saved to: {last_model_path}")
     print("Training complete.")

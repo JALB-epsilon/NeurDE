@@ -21,6 +21,8 @@ if __name__ == "__main__":
     parser.add_argument('--num_samples', type=int, default=500, help='Number of samples')
     parser.add_argument("--init_cond",  type=int, default=500, help='Number of samples')
     parser.add_argument("--save_frequency", default=50, help='Save model')
+    parser.add_argument("--with_obs", action='store_true', help='With observation')
+    parser.add_argument("--without_obs", action='store_false', help='Without observation')
     parser.add_argument("--trained_path", type=str, default=None)
     parser.set_defaults(save_model=True)
     args = parser.parse_args()
@@ -136,8 +138,35 @@ if __name__ == "__main__":
                 loss += inner_lose
                 Fi0, Gi0 = cylinder_solver.collision(Fi0.squeeze(0), Gi0.squeeze(0), Feq, Geq_pred.permute(1, 0).reshape(9, cylinder_solver.Y, cylinder_solver.X), rho, ux, uy, T)
                 Fi, Gi = cylinder_solver.streaming(Fi0, Gi0)
-                Fi0 = Fi
-                Gi0 = Gi
+                if args.with_obs:
+                    with torch.no_grad():
+                        khi = detach(torch.zeros_like(ux))
+                        zetax = detach(torch.zeros_like(ux))
+                        zetay = detach(torch.zeros_like(ux))
+
+                        Fi_obs_cyl, Gi_obs_cyl, Fi_obs_Inlet, Gi_obs_Inlet = cylinder_solver.get_obs_distribution(
+                                                                                                                ux, 
+                                                                                                                uy,
+                                                                                                                T,
+                                                                                                                rho,
+                                                                                                                khi,
+                                                                                                                zetax,
+                                                                                                                zetay)
+
+                        Fi_new, Gi_new = cylinder_solver.enforce_Obs_and_BC(Fi,
+                                                                            Gi,
+                                                                            Fi_obs_cyl,
+                                                                            Gi_obs_cyl,
+                                                                            Fi_obs_Inlet,
+                                                                            Gi_obs_Inlet)
+                                                
+
+                    Fi0 = Fi_new.detach()
+                    Gi0 = Gi_new.detach()
+
+                else: 
+                    Fi0 = Fi.detach()
+                    Gi0 = Gi.detach()
                 
                 #plot the results of the Mach number 
                 Ma_NN = cylinder_solver.get_local_Mach(ux, uy, T)
