@@ -23,10 +23,9 @@ if __name__ == "__main__":
     parser.add_argument("--compile", dest='compile', action='store_true', help='Compile', default=False)
     parser.add_argument('--save_model', action='store_true', help='Save model checkpoints (enabled by default)')
     parser.add_argument('--no-save_model', dest='save_model', action='store_false', help='Disable model checkpoint saving')
-    parser.add_argument('--case', type=int, choices=[1, 2], default=1, help='Case 1 or 2')
     parser.add_argument('--num_samples', type=int, default=500, help='Number of samples')
     parser.add_argument("--batch_size", type=int, default=32, help='Batch size')
-    parser.add_argument("--save_frequency", default=25, help='Save model')
+    parser.add_argument("--save_frequency", default=1, help='Save model')
     parser.set_defaults(save_model=True)
     args = parser.parse_args()
 
@@ -77,7 +76,7 @@ if __name__ == "__main__":
     epochs = param_training["stage1"]["epochs"]
     loss_func = calculate_relative_error
 
-    print(f"Training Case {args.case} on {device}. Epochs: {epochs}, Samples: {args.num_samples}")
+    print(f"Training Cylinder on {device}. Epochs: {epochs}, Samples: {args.num_samples}")
   
 
 
@@ -115,7 +114,7 @@ if __name__ == "__main__":
             if args.save_model and epochs_since_last_save[max_index] >= save_frequency:
                 if best_model_paths[max_index] and os.path.exists(best_model_paths[max_index]):
                     os.remove(best_model_paths[max_index])
-                save_path = os.path.join(param_training["stage1"]["model_dir"], f"best_model_{args.case}_epoch_{epoch+1}_top_{max_index+1}_loss_{current_loss:.6f}.pt")
+                save_path = os.path.join(param_training["stage1"]["model_dir"], f"best_model_epoch_{epoch+1}_top_{max_index+1}_loss_{current_loss:.6f}.pt")
                 torch.save(best_models[max_index], save_path)
                 print(f"Top {max_index+1} model saved to: {save_path}")
                 best_model_paths[max_index] = save_path
@@ -130,7 +129,7 @@ if __name__ == "__main__":
     # Save the last model with its loss
     if args.save_model:
         last_epoch_loss= current_loss
-        last_model_path = os.path.join(param_training["stage1"]["model_dir"], f"last_model_{args.case}_epoch_{epochs}_loss_{last_epoch_loss:.6f}.pt")
+        last_model_path = os.path.join(param_training["stage1"]["model_dir"], f"last_model_epoch_{epochs}_loss_{last_epoch_loss:.6f}.pt")
         torch.save(model.state_dict(), last_model_path)
         print(f"Last model saved to: {last_model_path}")
 

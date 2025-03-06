@@ -101,6 +101,11 @@ def levermore_Geq_BCs(ex, ey, ux, uy, T, rho, Cv, Qn, khi, zetax, zetay, row, co
     R = len(row)
 
     # Newton-Raphson iteration
+    
+    dkhi = np.zeros_like(khi, order='F')
+    dzetax = np.zeros_like(zetax, order='F')
+    dzetay = np.zeros_like(zetay, order='F')
+
     for _ in range(20):
         khi[np.abs(khi) < 1e-6] = 0
         zetax[np.abs(zetax) < 1e-6] = 0
@@ -132,27 +137,27 @@ def levermore_Geq_BCs(ex, ey, ux, uy, T, rho, Cv, Qn, khi, zetax, zetay, row, co
         J[2, 2] = np.dot(ey**2, f)
 
 
-        # Calculate inverse Jacobian and update parameters
-        IJ = np.linalg.inv(J.transpose(2, 0, 1))  # Transpose to get correct shape for batched inverse
-        d_params = -np.matmul(IJ, F).transpose(0, 2, 1)[:, 0, :]
+        IJ = multinv(J)
+        khi1 = khi.copy()
+        zetax1 = zetax.copy() # very important to use copy, in python array is stored by reference 
+        zetay1 = zetay.copy()
 
+        # newton Method to find root
+        khi[row,col] = khi[row,col] -(IJ[0, 0] * F[0] + IJ[0, 1] * F[1] + IJ[0, 2] * F[2])       
+        zetax[row,col] =zetax[row,col]- (IJ[1, 0] * F[0] + IJ[1, 1] * F[1] + IJ[1, 2] * F[2])
+        zetay[row,col] =zetay[row,col]- (IJ[2, 0] * F[0] + IJ[2, 1] * F[1] + IJ[2, 2] * F[2]) 
+        
+        dkhi[row,col] = np.abs((khi[row,col] - khi1[row,col]) / (khi1[row,col]+eps))
+        dzetax[row,col] = np.abs((zetax[row,col] - zetax1[row,col]) / (zetax1[row,col]+eps))
+        dzetay[row,col] = np.abs((zetay[row,col] - zetay1[row,col]) / (zetay1[row,col]+eps))
 
-        khi_old = khi[row, col].copy()
-        zetax_old = zetax[row, col].copy()
-        zetay_old = zetay[row, col].copy()
+        mkhi = np.max(np.abs(dkhi[row,col]))
+        mzetax = np.max(np.abs(dzetax[row,col]))
+        mzetay = np.max(np.abs(dzetay[row,col]))
 
-        khi[row, col] += d_params[:, 0]
-        zetax[row, col] += d_params[:, 1]
-        zetay[row, col] += d_params[:, 2]
+        mx = max([mkhi, mzetax, mzetay])
 
-        # Calculate convergence criteria
-        dkhi = np.abs((khi[row, col] - khi_old) / (khi_old + eps))
-        dzetax = np.abs((zetax[row, col] - zetax_old) / (zetax_old + eps))
-        dzetay = np.abs((zetay[row, col] - zetay_old) / (zetay_old + eps))
-
-        max_diff = max(np.max(dkhi), np.max(dzetax), np.max(dzetay))
-
-        if max_diff < 1e-6:
+        if mx < 1e-6:
             break
 
     # Calculate final equilibrium distribution
@@ -217,25 +222,47 @@ def levermore_Geq_Obs(ex, ey, ux, uy, T, rho, Cv, Qn, khi, zetax, zetay, Obs):
         J[2, 2, L] = np.dot(ey**2, f)
 
 
-        IJ = np.linalg.inv(J.transpose(2, 0, 1))
+        IJ = multinv(J)
 
-        d_params = -np.matmul(IJ, F).transpose(0, 2, 1)[:, 0, :]
+        khi1 = khi[Obs].copy()
+        zetax1 = zetax[Obs].copy()
+        zetay1 = zetay[Obs].copy()
 
-        khi_old = khi[Obs].copy()
-        zetax_old = zetax[Obs].copy()
-        zetay_old = zetay[Obs].copy()
+        sz = F[0, L].shape[0]
 
-        khi[Obs] += d_params[:, 0] 
-        zetax[Obs] += d_params[:, 1]
-        zetay[Obs] += d_params[:, 2] 
+        # Pre-compute F slices (scalar values)
+        F_0L = F[0, L]
+        F_1L = F[1, L]
+        F_2L = F[2, L]
 
-        dkhi[Obs] = np.abs((khi[Obs] - khi_old) / (khi_old + eps))
-        dzetax[Obs] = np.abs((zetax[Obs] - zetax_old) / (zetax_old + eps))
-        dzetay[Obs] = np.abs((zetay[Obs] - zetay_old) / (zetay_old + eps))
+        # Directly update khi, zetax, zetay using views (no new arrays created)
+        khi[Obs] -= (IJ[0, 0, L].reshape(sz, order='F') * F_0L +
+                    IJ[0, 1, L].reshape(sz, order='F') * F_1L +
+                    IJ[0, 2, L].reshape(sz, order='F') * F_2L)
 
-        max_diff = np.max(np.stack((dkhi[Obs], dzetax[Obs], dzetay[Obs])), axis=0).max()
+        zetax[Obs] -= (IJ[1, 0, L].reshape(sz, order='F') * F_0L +
+                    IJ[1, 1, L].reshape(sz, order='F') * F_1L +
+                    IJ[1, 2, L].reshape(sz, order='F') * F_2L)
 
-        if max_diff < 1e-6:
+        zetay[Obs] -= (IJ[2, 0, L].reshape(sz, order='F') * F_0L +
+                    IJ[2, 1, L].reshape(sz, order='F') * F_1L +
+                    IJ[2, 2, L].reshape(sz, order='F') * F_2L)
+
+        # Calculate differences directly into dkhi, dzetax, dzetay
+        np.abs((khi[Obs] - khi1) / (khi1 + eps), out=dkhi[Obs])
+        np.abs((zetax[Obs] - zetax1) / (zetax1 + eps), out=dzetax[Obs])
+        np.abs((zetay[Obs] - zetay1) / (zetay1 + eps), out=dzetay[Obs])
+
+        # Calculate minimums directly
+        mkhi = np.min(dkhi[Obs])
+        mzetax = np.min(dzetax[Obs])
+        mzetay = np.min(dzetay[Obs])
+
+
+
+        mx = min(mkhi, mzetax, mzetay)
+
+        if mx < 1e-6:
             break
 
     Feq = w * rho[None, Obs] * np.exp(khi[None, Obs] + zetax[None, Obs] * ex[:, None] + zetay[None, Obs] * ey[:, None])

@@ -54,7 +54,7 @@ class SODSolver(nn.Module):
 
         self.Y_indices = Y_indices.expand(self.Qn, self.Y, self.X)
         self.X_indices = X_indices.expand(self.Qn, self.Y, self.X)
-
+        del Y_indices, X_indices
 
     def dot_prod(self, ux, uy):
         return ux**2 + uy**2
