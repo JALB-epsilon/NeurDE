@@ -204,7 +204,7 @@ if __name__ == "__main__":
             if args.save_model and epochs_since_last_save[max_index] >= save_frequency:
                 if best_model_paths[max_index] and os.path.exists(best_model_paths[max_index]):
                     os.remove(best_model_paths[max_index])
-                save_path = os.path.join(param_training["stage2"]["model_dir"], f"best_model_{args.case}_epoch_{epoch+1}_top_{max_index+1}__loss_{current_loss:.6f}.pt")
+                save_path = os.path.join(param_training["stage2"]["model_dir"], f"best_model_epoch_{epoch+1}_top_{max_index+1}__loss_{current_loss:.6f}.pt")
                 torch.save(best_models[max_index], save_path)
                 print(f"Top {max_index+1} model saved to: {save_path}")
                 best_model_paths[max_index] = save_path
