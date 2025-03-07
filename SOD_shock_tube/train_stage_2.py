@@ -157,7 +157,7 @@ if __name__ == "__main__":
             T_old = torch.zeros_like(Fi0[1, ...])
             rho_old = torch.zeros_like(Fi0[1, ...])
             if args.TVD:
-                tvd_weight = tvd_weight_scheduler(epoch, epochs, initial_weight=1e-8, final_weight=1e-4)
+                tvd_weight = tvd_weight_scheduler(epoch, epochs, initial_weight=1e-8, final_weight=1)
         for batch_idx, (F_seq, G_seq, Feq_seq, Geq_seq) in enumerate(dataloader):
             optimizer.zero_grad()
             model.train()
@@ -241,6 +241,13 @@ if __name__ == "__main__":
         else:
             for i in range(3):
                 epochs_since_last_save[i] += 1
+
+        if epoch % 250 == 0:
+            print(f"Epoch: {epoch}, Loss: {current_loss:.6f}")
+            save_path = os.path.join(param_training["stage2"]["model_dir"], f"model_{args.case}_loss_{current_loss:.6f}.pt")
+            torch.save(model.state_dict(), save_path)
+            
+
 
     # Save the last model with its loss
     if args.save_model:
