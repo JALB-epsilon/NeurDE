@@ -25,7 +25,7 @@ if __name__ == "__main__":
     parser.add_argument("--without_obs", action='store_false', help='Without observation')
     parser.add_argument("--trained_path", type=str, default=None)
     parser.set_defaults(save_model=True)
-    parser.set_defaults(with_obs=False)
+    parser.set_defaults(with_obs=True)
     args = parser.parse_args()
 
     device = get_device(args.device)
