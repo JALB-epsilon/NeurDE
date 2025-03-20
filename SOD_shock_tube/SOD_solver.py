@@ -22,9 +22,9 @@ class SODSolver(nn.Module):
         self.alpha1 = alpha1
         self.alpha01 = alpha01
         self.vuy = vuy
-        self.Pr = Pr
-        self.muy = muy
-        self.Uax = Uax
+        self.Pr = Pr  # Prandtl number
+        self.muy = muy # dynamic viscosity
+        self.Uax = Uax 
         self.Uay = Uay
         self.device = device
         ex_values = [1, 0, -1, 0, 1, -1, -1, 1, 0]
@@ -153,9 +153,9 @@ class SODSolver(nn.Module):
         momentumx = rho * ux
         momentumy = rho * uy
         rhoT = rho * T
-        P_Maxw_xx = momentumx * ux + rhoT # pressure tensor in xx in equilibrium
-        P_Maxw_yy =momentumy* uy + rhoT  # pressure tensor in yy in equilibrium
-        P_Maxw_xy = momentumx * uy  # pressure tensor in xy in equilibrium
+        P_Maxw_xx = momentumx * ux + rhoT # MB pressure tensor in xx direction
+        P_Maxw_yy =momentumy* uy + rhoT 
+        P_Maxw_xy = momentumx * uy 
         return P_Maxw_xx, P_Maxw_yy, P_Maxw_xy
     
     def get_pressure_tensor(self, F):

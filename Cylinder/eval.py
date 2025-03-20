@@ -24,7 +24,7 @@ if __name__ == "__main__":
     parser.add_argument("--with_obs", action='store_true', help='With obstacle')
     parser.add_argument("--trained_path", type=str, default=None)
     parser.set_defaults(save_model=True)
-    parser.set_defaults(with_obs=False) # Ensure default is without_obs
+    parser.set_defaults(with_obs=True) # Ensure default is without_obs
 
     args = parser.parse_args()
 
