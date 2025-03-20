@@ -132,7 +132,7 @@ if __name__ == "__main__":
 
                 inner_lose = loss_func(Geq_pred, Geq_target.permute(0, 2, 3, 1).reshape(-1, 9))
                 loss += inner_lose
-                Fi0, Gi0 = sod_solver.collision(Fi0.squeeze(0), Gi0.squeeze(0), Feq, Geq_pred.permute(1, 0).reshape(9, sod_solver.Y, sod_solver.X), rho, ux, uy, T)
+                Fi0, Gi0 = sod_solver.collision(Fi0.squeeze(0), Gi0.squeeze(0), Feq, Geq_pred.permute(1, 0).reshape(sod_solver.Qn, sod_solver.Y, sod_solver.X), rho, ux, uy, T)
                 Fi, Gi = sod_solver.streaming(Fi0, Gi0)
                 Fi0 = Fi
                 Gi0 = Gi

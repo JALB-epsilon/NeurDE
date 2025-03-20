@@ -83,6 +83,20 @@ def tvd_weight_scheduler(epoch, milestones, weights):
 
     return weights[-1]
 
+class SodDataset_stage1(Dataset):
+    def __init__(self, rho, ux, uy, T, Geq):
+        self.rho = torch.tensor(rho, dtype=torch.float32)
+        self.ux = torch.tensor(ux, dtype=torch.float32)
+        self.uy = torch.tensor(uy, dtype=torch.float32)
+        self.T = torch.tensor(T, dtype=torch.float32)
+        self.Geq = torch.tensor(Geq, dtype=torch.float32)
+
+    def __len__(self):
+        return len(self.rho)
+
+    def __getitem__(self, idx):
+        return self.rho[idx], self.ux[idx], self.uy[idx], self.T[idx], self.Geq[idx]
+    
 
 class SodDataset_stage2(Dataset):
     def __init__(self, F, G, Feq, Geq):
