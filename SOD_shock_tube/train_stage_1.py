@@ -45,12 +45,12 @@ if __name__ == "__main__":
 
     all_rho, all_ux, all_uy, all_T, all_Geq = load_equilibrium_state(param_training["data_dir"])
 
-    dataset = SodDataset(all_rho[:args.num_samples], all_ux[:args.num_samples], all_uy[:args.num_samples], all_T[:args.num_samples], all_Geq[:args.num_samples])
+    dataset = SodDataset_stage1(all_rho[:args.num_samples], all_ux[:args.num_samples], all_uy[:args.num_samples], all_T[:args.num_samples], all_Geq[:args.num_samples])
     dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True, num_workers=4, pin_memory=True)
 
     model = NeurDE(
         alpha_layer=[4] + [param_training["hidden_dim"]] * param_training["num_layers"],
-        branch_layer=[2] + [param_training["hidden_dim"]] * param_training["num_layers"],
+        phi_layer=[2] + [param_training["hidden_dim"]] * param_training["num_layers"],
         activation='relu'
     ).to(device)
 
