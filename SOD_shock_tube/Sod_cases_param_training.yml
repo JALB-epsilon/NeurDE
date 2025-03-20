@@ -41,13 +41,14 @@
         eta_min: 0.000005
   stage2:
     epochs: 1000
-    lr: 0.0001
+    lr: 1.0e-5
     model_dir: results/case2/stage2
     N: 25
+    TVD: True
     scheduler: OneCycleLR
     scheduler_config:
       OneCycleLR:
-        max_lr: 0.0005 
+        max_lr: 1.0e-4 
         pct_start: 0.3
         div_factor: 10
         final_div_factor: 100
