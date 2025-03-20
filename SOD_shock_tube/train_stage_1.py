@@ -37,7 +37,7 @@ if __name__ == "__main__":
     case_params = config[args.case]
     case_params['device'] = device
 
-    with open("Sod_cases_param _training.yml", 'r') as stream:
+    with open("Sod_cases_param_training.yml", 'r') as stream:
         training_config = yaml.safe_load(stream)
     param_training = training_config[args.case]
 
@@ -49,7 +49,7 @@ if __name__ == "__main__":
 
     model = NeurDE(
         alpha_layer=[4] + [param_training["hidden_dim"]] * param_training["num_layers"],
-        branch_layer=[2] + [param_training["hidden_dim"]] * param_training["num_layers"],
+        phi_layer=[2] + [param_training["hidden_dim"]] * param_training["num_layers"],
         activation='relu'
     ).to(device)
 
