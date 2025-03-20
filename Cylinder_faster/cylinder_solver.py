@@ -257,8 +257,7 @@ class Cylinder_base(nn.Module):
         return Geq_BC, khi, zetax, zetay
 
 
-    def get_obs_distribution(self, rho, ux, uy, T, khi, zetax, zetay):
-        # Obstacle distribution
+    def get_obs_distribution(self, rho, ux, uy, T,  khi, zetax, zetay):
         ux_obs = torch.where(self.Obs, torch.tensor(0.0, device=self.device), ux)
         uy_obs = torch.where(self.Obs, torch.tensor(0.0, device=self.device), uy)
         T_obs = torch.where(self.Obs, torch.tensor(self.T0, device=self.device), T)
@@ -291,7 +290,7 @@ class Cylinder_base(nn.Module):
 
 
         Fi_obs_Inlet = self.get_Feq_BC(rho_obs, ux_obs, uy_obs, T_obs)
-        Gi_obs_Inlet, _, _, _ = self.get_Geq_Newton_solver_BC(rho_obs,
+        Gi_obs_Inlet, khi, zetax, zetay = self.get_Geq_Newton_solver_BC(rho_obs,
                                                             ux_obs,
                                                             uy_obs,
                                                             T_obs,
@@ -520,13 +519,13 @@ def main():
             Fi0, Gi0 = cylinder_solver.collision(Fi0, Gi0, Feq, Geq, rho, ux, uy, T)
             Fi, Gi = cylinder_solver.streaming(Fi0, Gi0)
             Fi_obs_cyl, Gi_obs_cyl, Fi_obs_Inlet, Gi_obs_Inlet = cylinder_solver.get_obs_distribution(
-                                                                rho,
-                                                                ux, 
-                                                                uy,
-                                                                T,
-                                                                khi,
-                                                                zetax,
-                                                                zetay)
+                                                                            rho,
+                                                                            ux, 
+                                                                            uy,
+                                                                            T,
+                                                                            khi,
+                                                                            zetax,
+                                                                            zetay)
             
             all_Fi_obs_cyl.append(detach(Fi_obs_cyl))
             all_Gi_obs_cyl.append(detach(Gi_obs_cyl))

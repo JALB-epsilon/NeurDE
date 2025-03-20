@@ -132,23 +132,20 @@ if __name__ == "__main__":
     last_epoch_loss = 0.0
 
     # Get the first batch from the dataloader
-    #first_batch = next(iter(dataloader))
-    #Fi0, Gi0, Feq_seq, Geq_seq = first_batch
-    #Fi0 = Fi0[0, 0, ...].to(device)
-    #Gi0 = Gi0[0, 0, ...].to(device)
+    first_batch = next(iter(dataloader))
+    Fi0, Gi0, Feq_seq, Geq_seq = first_batch
+    Fi0 = Fi0[0, 0, ...].to(device)
+    Gi0 = Gi0[0, 0, ...].to(device)
 
 
     for epoch in tqdm(range(epochs), desc="Epochs"):
         loss_epoch = 0
-        for batch_idx, (F_seq, G_seq, Feq_seq, Geq_seq) in enumerate(dataloader):
-            optimizer.zero_grad()
-            model.train()
-            total_loss = 0
-            F_seq = F_seq.to(device)
-            G_seq = G_seq.to(device)
-            Fi0 = F_seq[0, 0, ...]
-            Gi0 = G_seq[0, 0, ...]
-            for rollout in range(number_of_rollout):       
+        val_loss = 0.0
+        model.eval()
+        with torch.no_grad():
+            Fi0 = next(iter(val_dataset))[0].to(device)
+            Gi0 = next(iter(val_dataset))[1].to(device)            
+            for F_val, G_val, Feq_val, Geq_val in val_dataset:
                 rho, ux, uy, E = cylinder_solver.get_macroscopic(Fi0, Gi0)
                 T = cylinder_solver.get_temp_from_energy(ux, uy, E)
                 Feq = cylinder_solver.get_Feq(rho, ux, uy, T)
@@ -159,49 +156,43 @@ if __name__ == "__main__":
                 total_loss += inner_loss
                 Fi0, Gi0 = cylinder_solver.collision(Fi0, Gi0, Feq, Geq_pred.permute(1, 0).reshape(cylinder_solver.Qn, cylinder_solver.Y, cylinder_solver.X), rho, ux, uy, T)
                 Fi, Gi = cylinder_solver.streaming(Fi0, Gi0)
+                khi = detach(torch.zeros_like(ux))
+                zetax = detach(torch.zeros_like(ux))
+                zetay = detach(torch.zeros_like(ux))
+
+                Fi_obs_cyl, Gi_obs_cyl, Fi_obs_Inlet, Gi_obs_Inlet = cylinder_solver.get_obs_distribution(
+                                            ux, 
+                                            uy,
+                                            T,
+                                            rho,
+                                            khi,
+                                            zetax,
+                                            zetay)
+
+                Fi_new, Gi_new = cylinder_solver.enforce_Obs_and_BC(Fi,
+                                            Gi,
+                                            Fi_obs_cyl,
+                                            Gi_obs_cyl,
+                                            Fi_obs_Inlet,
+                                            Gi_obs_Inlet)
                 
-                with torch.no_grad():
-                    khi = detach(torch.zeros_like(ux))
-                    zetax = detach(torch.zeros_like(ux))
-                    zetay = detach(torch.zeros_like(ux))
 
-                    Fi_obs_cyl, Gi_obs_cyl, Fi_obs_Inlet, Gi_obs_Inlet = cylinder_solver.get_obs_distribution(
-                                                rho,
-                                                ux, 
-                                                uy,
-                                                T,
-                                                khi,
-                                                zetax,
-                                                zetay)
+                Fi0 = Fi_new
+                Gi0 = Gi_new
+            val_loss /= len(val_dataset)
+            print("-" * 50)
+            print(f"Validation Loss: {val_loss:.10f}")
+            print("-" * 50)
 
-                    Fi_new, Gi_new = cylinder_solver.enforce_Obs_and_BC(Fi,
-                                                Gi,
-                                                Fi_obs_cyl,
-                                                Gi_obs_cyl,
-                                                Fi_obs_Inlet,
-                                                Gi_obs_Inlet)
-                    
-                    
-        
-                Fi0 = Fi_new.clone()
-                Gi0 = Gi_new.clone()
-            total_loss.backward(retain_graph=True)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()
-            loss_epoch += total_loss.item()
-            print(f"Epoch: {epoch}, Batch ID: {batch_idx}, Loss: {total_loss.item()/number_of_rollout:.6f}")
-        current_loss = loss_epoch / len(dataloader)
-        scheduler.step()
-
-        if current_loss < max(best_losses):
+        if val_loss < max(best_losses):
             max_index = best_losses.index(max(best_losses))
-            best_losses[max_index] = current_loss
+            best_losses[max_index] = val_loss
             best_models[max_index] = model.state_dict()
 
             if args.save_model and epochs_since_last_save[max_index] >= save_frequency:
                 if best_model_paths[max_index] and os.path.exists(best_model_paths[max_index]):
                     os.remove(best_model_paths[max_index])
-                save_path = os.path.join(param_training["stage2"]["model_dir"], f"best_model_epoch_{epoch+1}_top_{max_index+1}_{current_loss:.12f}.pt")
+                save_path = os.path.join(param_training["stage2"]["model_dir"], f"best_model_epoch_{epoch+1}_top_{max_index+1}_val_loss_{val_loss:.6f}.pt")
                 torch.save(best_models[max_index], save_path)
                 print(f"Top {max_index+1} model saved to: {save_path}")
                 best_model_paths[max_index] = save_path
@@ -213,9 +204,9 @@ if __name__ == "__main__":
             for i in range(3):
                 epochs_since_last_save[i] += 1
 
-        if epoch % 200 == 0 and epoch > 0:
+        if epoch % 200 == 0:
             print(f"Epoch: {epoch}, Loss: {current_loss:.6f}")
-            save_path = os.path.join(param_training["stage2"]["model_dir"], f"model_epoch_{epoch}_loss_{current_loss:.6f}.pt")
+            save_path = os.path.join(param_training["stage2"]["model_dir"], f"model_epoch_{epoch}_loss_{val_loss:.6f}.pt")
             torch.save(model.state_dict(), save_path)
             
 

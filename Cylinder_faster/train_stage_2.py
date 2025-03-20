@@ -25,7 +25,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     device = get_device(args.device)
-    args.pre_trained_path = args.pre_trained_path.replace("Cylinder/", "")
+    args.pre_trained_path ="results/stage1/best_model_epoch_968_top_1_loss_0.004184.pt" #args.pre_trained_path.replace("Cylinder/", "")
     print(args.pre_trained_path)
 
 
@@ -119,7 +119,7 @@ if __name__ == "__main__":
     basis = create_basis(Uax, Uay, device)
 
     epochs = param_training["stage2"]["epochs"]
-    loss_func = calculate_relative_error
+    loss_func = calculate_relative_error # nn.MSELoss()
 
     print(f"Training Case Cylinder on {device}. Epochs: {epochs}, Samples: {args.num_samples}")
 
@@ -141,14 +141,16 @@ if __name__ == "__main__":
     for epoch in tqdm(range(epochs), desc="Epochs"):
         loss_epoch = 0
         for batch_idx, (F_seq, G_seq, Feq_seq, Geq_seq) in enumerate(dataloader):
-            optimizer.zero_grad()
-            model.train()
-            total_loss = 0
+
+
             F_seq = F_seq.to(device)
             G_seq = G_seq.to(device)
             Fi0 = F_seq[0, 0, ...]
             Gi0 = G_seq[0, 0, ...]
+            optimizer.zero_grad()
+            total_loss = 0 #in the rollout loop
             for rollout in range(number_of_rollout):       
+                model.train()
                 rho, ux, uy, E = cylinder_solver.get_macroscopic(Fi0, Gi0)
                 T = cylinder_solver.get_temp_from_energy(ux, uy, E)
                 Feq = cylinder_solver.get_Feq(rho, ux, uy, T)
@@ -159,33 +161,34 @@ if __name__ == "__main__":
                 total_loss += inner_loss
                 Fi0, Gi0 = cylinder_solver.collision(Fi0, Gi0, Feq, Geq_pred.permute(1, 0).reshape(cylinder_solver.Qn, cylinder_solver.Y, cylinder_solver.X), rho, ux, uy, T)
                 Fi, Gi = cylinder_solver.streaming(Fi0, Gi0)
-                
+                #print("loss", inner_loss.item())
                 with torch.no_grad():
-                    khi = detach(torch.zeros_like(ux))
-                    zetax = detach(torch.zeros_like(ux))
-                    zetay = detach(torch.zeros_like(ux))
+                    khi = torch.zeros_like(ux).cpu().numpy()
+                    zetax = torch.zeros_like(ux).cpu().numpy()
+                    zetay = torch.zeros_like(ux).cpu().numpy()
 
                     Fi_obs_cyl, Gi_obs_cyl, Fi_obs_Inlet, Gi_obs_Inlet = cylinder_solver.get_obs_distribution(
-                                                rho,
-                                                ux, 
-                                                uy,
-                                                T,
-                                                khi,
-                                                zetax,
-                                                zetay)
+                                                                                        rho,
+                                                                                        ux, 
+                                                                                        uy,
+                                                                                        T,
+                                                                                        khi,
+                                                                                         zetax,
+                                                                                        zetay)
 
-                    Fi_new, Gi_new = cylinder_solver.enforce_Obs_and_BC(Fi,
+                    Fi_new, Gi_new = cylinder_solver.enforce_Obs_and_BC(
+                                                Fi,
                                                 Gi,
                                                 Fi_obs_cyl,
                                                 Gi_obs_cyl,
                                                 Fi_obs_Inlet,
                                                 Gi_obs_Inlet)
                     
-                    
-        
-                Fi0 = Fi_new.clone()
-                Gi0 = Gi_new.clone()
-            total_loss.backward(retain_graph=True)
+   
+                 
+                Fi0 = Fi.clone()#Fi_new.clone()
+                Gi0 =Gi.clone() #Gi_new.clone()
+            total_loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
             loss_epoch += total_loss.item()

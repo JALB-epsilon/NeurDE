@@ -63,6 +63,12 @@ if __name__ == "__main__":
     param_training = training_config[args.case]
     number_of_rollout = param_training["stage2"]["N"]
 
+    if "TVD" in param_training["stage2"]:
+        args.TVD = True
+
+
+    print(f"TVD Enabled: {args.TVD}")
+
     os.makedirs(param_training["stage2"]["model_dir"], exist_ok=True)
     all_F, all_G, all_Feq, all_Geq = load_data_stage_2(param_training["data_dir"])
     dataset = RolloutBatchDataset(all_Fi=all_F[:args.num_samples],
@@ -75,14 +81,14 @@ if __name__ == "__main__":
     dataloader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=4, pin_memory=True)  # batch size 1 to get each sequence.
 
  
-    val_dataset = SodDataset_stage2(F = all_F[args.num_samples:args.num_samples+2*number_of_rollout],
-                                    G=all_G[args.num_samples:args.num_samples+2*number_of_rollout],
-                                    Feq=all_Feq[args.num_samples:args.num_samples+2*number_of_rollout],
-                                    Geq=all_Geq[args.num_samples:args.num_samples+2*number_of_rollout],)
+    val_dataset = SodDataset_stage2(F = all_F[args.num_samples:args.num_samples+100],
+                                    G=all_G[args.num_samples:args.num_samples+100],
+                                    Feq=all_Feq[args.num_samples:args.num_samples+100],
+                                    Geq=all_Geq[args.num_samples:args.num_samples+100],)
     
     model = NeurDE(
         alpha_layer=[4] + [param_training["hidden_dim"]] * param_training["num_layers"],
-        branch_layer=[2] + [param_training["hidden_dim"]] * param_training["num_layers"],
+        phi_layer=[2] + [param_training["hidden_dim"]] * param_training["num_layers"],
         activation='relu'
     ).to(device)
 
@@ -157,7 +163,7 @@ if __name__ == "__main__":
             T_old = torch.zeros_like(Fi0[1, ...])
             rho_old = torch.zeros_like(Fi0[1, ...])
             if args.TVD:
-                tvd_weight = tvd_weight_scheduler(epoch, epochs, initial_weight=1e-8, final_weight=1)
+                tvd_weight = 15
         for batch_idx, (F_seq, G_seq, Feq_seq, Geq_seq) in enumerate(dataloader):
             optimizer.zero_grad()
             model.train()
@@ -176,7 +182,7 @@ if __name__ == "__main__":
                 inner_loss = loss_func(Geq_pred, Geq_target.permute(1, 2, 0).reshape(-1, 9))
                 total_loss += inner_loss
                 if args.TVD and rollout > 0:
-                    loss_TVD = TVD_norm(ux, ux_old)+TVD_norm(T, T_old)+TVD_norm(rho, rho_old)
+                    loss_TVD = TVD_norm(T, T_old)+TVD_norm(ux, ux_old)+TVD_norm(rho, rho_old)
                     ux_old = ux.clone()
                     T_old = T.clone()
                     rho_old = rho.clone()
@@ -193,10 +199,12 @@ if __name__ == "__main__":
 
         scheduler.step()
 
-        if epoch % 100 == 0:
-            print(f"Epoch: {epoch}, Loss: {loss_epoch/len(dataloader):.6f}")
-
         current_loss = loss_epoch / len(dataloader)
+
+        if epoch % 100 == 0:
+            print(f"Epoch: {epoch}, Loss: {current_loss:.6f}")
+
+        
         
         model.eval()
         val_loss = 0.0
@@ -212,6 +220,7 @@ if __name__ == "__main__":
                 Geq_pred = model(inputs, basis)
                 Geq_target = Geq_val.to(device)
                 inner_loss = loss_func(Geq_pred, Geq_target.permute(1, 2, 0).reshape(-1, 9))
+                #print(inner_loss)
                 val_loss += inner_loss
                 Fi0, Gi0 = sod_solver.collision(Fi0, Gi0, Feq, Geq_pred.permute(1, 0).reshape(sod_solver.Qn, sod_solver.Y, sod_solver.X), rho, ux, uy, T)
                 Fi, Gi = sod_solver.streaming(Fi0, Gi0)
@@ -242,9 +251,9 @@ if __name__ == "__main__":
             for i in range(3):
                 epochs_since_last_save[i] += 1
 
-        if epoch % 250 == 0:
+        if epoch % 200 == 0:
             print(f"Epoch: {epoch}, Loss: {current_loss:.6f}")
-            save_path = os.path.join(param_training["stage2"]["model_dir"], f"model_{args.case}_loss_{current_loss:.6f}.pt")
+            save_path = os.path.join(param_training["stage2"]["model_dir"], f"model_{args.case}_epoch_{epoch}_loss_{val_loss:.6f}.pt")
             torch.save(model.state_dict(), save_path)
             
 

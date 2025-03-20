@@ -2,10 +2,10 @@ import torch
 import torch.nn as nn
 
 class NeurDE(nn.Module):
-    def __init__(self, alpha_layer, phi_layer, activation):
+    def __init__(self, alpha_layer, branch_layer, activation):
         super(NeurDE, self).__init__()
         self.alpha = DenseNet(alpha_layer, activation)
-        self.phi = DenseNet(phi_layer, activation)
+        self.phi = DenseNet(branch_layer, activation)
 
     def forward(self, u0, grid):
         # Ensure consistent input shapes

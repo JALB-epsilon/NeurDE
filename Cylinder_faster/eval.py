@@ -21,11 +21,11 @@ if __name__ == "__main__":
     parser.add_argument('--num_samples', type=int, default=500, help='Number of samples')
     parser.add_argument("--init_cond",  type=int, default=500, help='Number of samples')
     parser.add_argument("--save_frequency", default=50, help='Save model')
-    parser.add_argument("--with_obs", action='store_true', help='With obstacle')
+    parser.add_argument("--with_obs", action='store_true', help='With observation')
+    parser.add_argument("--without_obs", action='store_false', help='Without observation')
     parser.add_argument("--trained_path", type=str, default=None)
     parser.set_defaults(save_model=True)
-    parser.set_defaults(with_obs=False) # Ensure default is without_obs
-
+    parser.set_defaults(with_obs=False)
     args = parser.parse_args()
 
     device = get_device(args.device)
@@ -125,9 +125,6 @@ if __name__ == "__main__":
     Fi0 = torch.tensor(all_Fi0[args.num_samples], device=device)
     Gi0 = torch.tensor(all_Gi0[args.num_samples], device=device)
     loss=0
-    print("Start testing")
-    if args.with_obs is True:
-        print("With obstacle")
     with torch.no_grad():  
             for i in tqdm(range(args.num_samples)):
                 rho, ux, uy, E = cylinder_solver.get_macroscopic(Fi0.squeeze(0), Gi0.squeeze(0))
