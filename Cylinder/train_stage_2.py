@@ -213,7 +213,7 @@ if __name__ == "__main__":
             for i in range(3):
                 epochs_since_last_save[i] += 1
 
-        if epoch % 200 == 0 and epoch > 0:
+        if epoch % 50 == 0 and epoch > 0:
             print(f"Epoch: {epoch}, Loss: {current_loss:.6f}")
             save_path = os.path.join(param_training["stage2"]["model_dir"], f"model_epoch_{epoch}_loss_{current_loss:.6f}.pt")
             torch.save(model.state_dict(), save_path)

@@ -12,12 +12,15 @@ stage1:
       T_mult: 2
       eta_min: 5.01e-6
 stage2:
-  epochs: 300
-  lr: 5.0e-5
+  epochs: 1000
+  lr: 1.0e-5
   model_dir: results/stage2
-  scheduler: StepLR
-  N: 18
+  N: 20
+  scheduler: OneCycleLR
   scheduler_config:
-    StepLR:
-      step_size: 85
-      gamma: 0.5
+    OneCycleLR:
+      max_lr: 1.0e-4 
+      pct_start: 0.3
+      div_factor: 10
+      final_div_factor: 100
+
