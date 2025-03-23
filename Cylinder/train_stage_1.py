@@ -47,7 +47,7 @@ if __name__ == "__main__":
 
     model = NeurDE(
         alpha_layer=[4] + [param_training["hidden_dim"]] * param_training["num_layers"],
-        branch_layer=[2] + [param_training["hidden_dim"]] * param_training["num_layers"],
+        phi_layer=[2] + [param_training["hidden_dim"]] * param_training["num_layers"],
         activation='relu'
     ).to(device)
 
