@@ -1,7 +1,8 @@
 import numpy as np
-from .multinv import multinv
+import torch
+from .multinv import _multinv_torch
 
-def levermore_Geq(ex, ey, ux, uy, T, rho, Cv, Qn, khi, zetax, zetay):
+'''def levermore_Geq(ex, ey, ux, uy, T, rho, Cv, Qn, khi, zetax, zetay):
     """Calculates the Levermore equilibrium distribution function (optimized)."""
     ux[np.abs(ux) < 1e-6] = 0
     uy[np.abs(uy) < 1e-6] = 0
@@ -70,4 +71,92 @@ def levermore_Geq(ex, ey, ux, uy, T, rho, Cv, Qn, khi, zetax, zetay):
 
     Feq = w * rho[None, :, :] * np.exp(khi[None, :, :] + zetax[None, :, :] * ex[:, None, None] + zetay[None, :, :] * ey[:, None, None])
 
-    return Feq, khi, zetax, zetay
+    return Feq, khi, zetax, zetay'''
+
+def levermore_Geq_torch(
+    ex, ey, ux, uy, T, rho, Cv, Qn, khi, zetax, zetay, device=None, use_sparse=False
+):
+
+    if use_sparse:
+        print("Warning: Sparse inversion is not supported in PyTorch. Using dense batched inversion instead.")
+    is_numpy = isinstance(ux, np.ndarray)
+
+    # Determine target device
+    if device is None:
+        device = ux.device if not is_numpy else 'cpu'
+
+    # --- Optimized Tensor Conversion ("If Needed") ---
+    tensors = [torch.as_tensor(v, dtype=torch.float32, device=device)
+               for v in (ex, ey, ux, uy, T, rho, khi, zetax, zetay)]
+    ex, ey, ux, uy, T, rho, khi, zetax, zetay = tensors
+    Cv = float(Cv)
+    Qn = int(Qn)
+
+    # Numerical stability
+    T.masked_fill_(torch.abs(T) < 1e-6, 0)
+    rho.masked_fill_(torch.abs(rho) < 1e-6, 0)
+
+    Y, X = ux.shape
+    ex = ex.squeeze()
+    ey = ey.squeeze()
+
+    uu = ux**2 + uy**2
+    E = T * Cv + 0.5 * uu
+    H = E + T
+
+    w = torch.zeros((Qn, Y, X), device=device, dtype=torch.float32)
+    w[:4, :, :] = (1 - T) * T * 0.5
+    w[4:8, :, :] = T**2 * 0.25
+    w[8, :, :] = (1 - T)**2
+
+    max_iterations = 20
+    tol = 1e-6
+    # Batch-aware convergence mask: True = not yet converged
+    mask = torch.ones((Y, X), dtype=torch.bool, device=device)
+    for _ in range(max_iterations):
+        # Only update non-converged points
+        khi.masked_fill_((torch.abs(khi) < tol) & mask, 0)
+        zetax.masked_fill_((torch.abs(zetax) < tol) & mask, 0)
+        zetay.masked_fill_((torch.abs(zetay) < tol) & mask, 0)
+
+        f = w * torch.exp(khi[None, :, :] + zetax[None, :, :] * ex[:, None, None] + zetay[None, :, :] * ey[:, None, None])
+
+        F = torch.zeros((3, Y, X), device=device, dtype=torch.float32)
+        f_sum = f.sum(dim=0)
+        F[0, :, :] = f_sum - 2 * E
+        F[1, :, :] = torch.einsum("q,qyx->yx", ex, f) - 2 * ux * H
+        F[2, :, :] = torch.einsum("q,qyx->yx", ey, f) - 2 * uy * H
+
+        J = torch.zeros((3, 3, Y, X), device=device, dtype=torch.float32)
+        J[0, 0, :, :] = f_sum
+        J[0, 1, :, :] = F[1, :, :] + 2 * ux * H
+        J[0, 2, :, :] = F[2, :, :] + 2 * uy * H
+        J[1, 0, :, :], J[2, 0, :, :] = J[0, 1, :, :], J[0, 2, :, :]
+        J[1, 1, :, :] = torch.einsum("q,qyx->yx", ex**2, f)
+        J[1, 2, :, :] = torch.einsum("q,qyx->yx", ex * ey, f)
+        J[2, 1, :, :] = J[1, 2, :, :]
+        J[2, 2, :, :] = torch.einsum("q,qyx->yx", ey**2, f)
+
+        IJ = _multinv_torch(J, device=device)
+
+        khi1, zetax1, zetay1 = khi.clone(), zetax.clone(), zetay.clone()
+        delta = torch.einsum('ijyx,jyx->iyx', IJ, F)
+        # Only update non-converged points
+        khi = torch.where(mask, khi - delta[0], khi)
+        zetax = torch.where(mask, zetax - delta[1], zetax)
+        zetay = torch.where(mask, zetay - delta[2], zetay)
+
+        # Compute convergence for this step
+        dkhi = torch.abs(khi - khi1)
+        dzetax = torch.abs(zetax - zetax1)
+        dzetay = torch.abs(zetay - zetay1)
+        # Update mask: True = still not converged
+        mask = (dkhi > tol) | (dzetax > tol) | (dzetay > tol)
+        # Loop continues for all points, but only non-converged are updated
+
+    Feq = w * rho[None, :, :] * torch.exp(khi[None, :, :] + zetax[None, :, :] * ex[:, None, None] + zetay[None, :, :] * ey[:, None, None])
+
+    if is_numpy:
+        return Feq.cpu().numpy(), khi.cpu().numpy(), zetax.cpu().numpy(), zetay.cpu().numpy()
+    else:
+        return Feq, khi, zetax, zetay

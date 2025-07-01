@@ -10,12 +10,15 @@ def detach(x):
     return x.detach().cpu().numpy()
 
 def get_device(device_index):
-    device_map = {-1: 'cpu', 0: 'cuda:0', 1: 'cuda:1', 2: 'cuda:2', 3: 'cuda:3'}
-    selected_device = device_map.get(device_index, 'cpu')
-    if selected_device.startswith('cuda') and not torch.cuda.is_available():
-        print(f"CUDA not available. Switching to CPU {torch.cuda.is_available()}.")
-        selected_device = 'cpu'
-    return selected_device
+    # Check number of available CUDA devices
+    n_cuda = torch.cuda.device_count() if torch.cuda.is_available() else 0
+    if n_cuda == 0:
+        print("CUDA not available. Switching to CPU.")
+        return 'cpu'
+    if device_index < 0 or device_index >= n_cuda:
+        print(f"Requested CUDA device {device_index} not available. Using cuda:0 instead.")
+        return 'cuda:0'
+    return f'cuda:{device_index}'
 
 def set_seed(seed=0):
     torch.manual_seed(seed)
