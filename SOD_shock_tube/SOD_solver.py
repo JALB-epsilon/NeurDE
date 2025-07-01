@@ -341,18 +341,6 @@ def main():
     all_Gi0 = []
     if args.plot:
         os.makedirs('images', exist_ok=True)
-
-    # --- PROFILING CONTEXT ---
-    import torch.profiler
-    profiler = torch.profiler.profile(
-        schedule=torch.profiler.schedule(wait=0, warmup=1, active=3, repeat=1),
-        on_trace_ready=torch.profiler.tensorboard_trace_handler('./profiler_log'),
-        record_shapes=True,
-        profile_memory=True,
-        with_stack=True
-    )
-    profiler.start()
-    
     with torch.no_grad():  
         for i in range(args.steps):
             Fi0, Gi0, khi0, zetax0, zetay0, rho, ux, uy, T, Feq, Geq = sod_solver.step(Fi0, Gi0, khi0, zetax0, zetay0)
@@ -367,21 +355,17 @@ def main():
             if args.plot and (i % 100 == 0):
                 P = sod_solver.get_pressure(T, rho)
                 plot_simulation_results(rho, ux, T, P, i, args.case)
-            profiler.step()
-    profiler.stop()
-    print(profiler.key_averages().table(sort_by="cuda_time_total", row_limit=20))
-
-    if args.save:
-        os.makedirs('data_base', exist_ok=True)
-        with h5py.File(f'data_base/SOD_case{args.case}.h5', 'w') as f:
-            f.create_dataset('rho', data=all_rho) 
-            f.create_dataset('ux', data=all_ux)  
-            f.create_dataset('uy', data=all_uy)
-            f.create_dataset('T', data=all_T)
-            f.create_dataset('Feq', data=all_Feq)
-            f.create_dataset('Geq', data=all_Geq)
-            f.create_dataset('Fi0', data=all_Fi0)
-            f.create_dataset('Gi0', data=all_Gi0) 
+        if args.save:
+            os.makedirs('data_base', exist_ok=True)
+            with h5py.File(f'data_base/SOD_case{args.case}.h5', 'w') as f:
+                f.create_dataset('rho', data=all_rho) 
+                f.create_dataset('ux', data=all_ux)  
+                f.create_dataset('uy', data=all_uy)
+                f.create_dataset('T', data=all_T)
+                f.create_dataset('Feq', data=all_Feq)
+                f.create_dataset('Geq', data=all_Geq)
+                f.create_dataset('Fi0', data=all_Fi0)
+                f.create_dataset('Gi0', data=all_Gi0) 
 
 if __name__=="__main__":
     main()
