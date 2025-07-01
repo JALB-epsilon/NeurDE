@@ -29,12 +29,13 @@ class SODSolver(nn.Module):
         self.Uax = Uax 
         self.Uay = Uay
         self.device = device
+        self.dtype = torch.get_default_dtype()
         ex_values = [1, 0, -1, 0, 1, -1, -1, 1, 0]
         ey_values = [0, 1, 0, -1, 1, 1, -1, -1, 0]
-        self.ex = torch.tensor(ex_values, dtype=torch.float32, device=self.device) + self.Uax
-        self.ey = torch.tensor(ey_values, dtype=torch.float32, device=self.device) + self.Uay
-        self.ex1 = torch.tensor(ex_values, dtype=torch.float32, device=self.device)
-        self.ey1 = torch.tensor(ey_values, dtype=torch.float32, device=self.device)
+        self.ex = torch.tensor(ex_values, dtype=self.dtype, device=self.device) + self.Uax
+        self.ey = torch.tensor(ey_values, dtype=self.dtype, device=self.device) + self.Uay
+        self.ex1 = torch.tensor(ex_values, dtype=self.dtype, device=self.device)
+        self.ey1 = torch.tensor(ey_values, dtype=self.dtype, device=self.device)
         del ex_values, ey_values
         self.Lx = self.X // 2
         self.get_derived_quantities()
@@ -217,45 +218,45 @@ class SODSolver(nn.Module):
         return Fi, Gi
     
     def case_1_initial_conditions(self):
-        rho0 = torch.ones((self.Y, self.X), device=self.device)  # density
-        ux0 = torch.zeros((self.Y, self.X), device=self.device)  # fluid velocity in x
-        uy0 = torch.zeros((self.Y, self.X), device=self.device)  # fluid velocity in y
-        T0 = torch.ones((self.Y, self.X), device=self.device)  # temperature
+        dtype = self.dtype
+        rho0 = torch.ones((self.Y, self.X), device=self.device, dtype=dtype)  # density
+        ux0 = torch.zeros((self.Y, self.X), device=self.device, dtype=dtype)  # fluid velocity in x
+        uy0 = torch.zeros((self.Y, self.X), device=self.device, dtype=dtype)  # fluid velocity in y
+        T0 = torch.ones((self.Y, self.X), device=self.device, dtype=dtype)  # temperature
         rho0[:, :self.Lx + 1] = 0.5
         rho0[:, self.Lx + 1:] = 2
         T0[:, :self.Lx + 1] = 0.2  # temperature
         T0[:, self.Lx + 1:] = 0.025  # temperature
-        # Use torch.zeros on the correct device for Lagrange multipliers
-        khi0 = torch.zeros((self.Y, self.X), device=self.device)
-        zetax0 = torch.zeros((self.Y, self.X), device=self.device)
-        zetay0 = torch.zeros((self.Y, self.X), device=self.device)
-        Fi0 = self.get_Feq(rho0, ux0, uy0, T0)  # F_i population
-        Gi0, khi, zetax, zetay = self.get_Geq_Newton_solver(rho0, ux0, uy0, T0, khi0, zetax0, zetay0) # G_i population
-        Fi0 = Fi0.to(self.device)
-        Gi0 = Gi0.to(self.device)
+        khi0 = torch.zeros((self.Y, self.X), device=self.device, dtype=dtype)
+        zetax0 = torch.zeros((self.Y, self.X), device=self.device, dtype=dtype)
+        zetay0 = torch.zeros((self.Y, self.X), device=self.device, dtype=dtype)
+        Fi0 = self.get_Feq(rho0, ux0, uy0, T0)
+        Gi0, khi, zetax, zetay = self.get_Geq_Newton_solver(rho0, ux0, uy0, T0, khi0, zetax0, zetay0)
+        Fi0 = Fi0.to(self.device, dtype=dtype)
+        Gi0 = Gi0.to(self.device, dtype=dtype)
         del T0
         return Fi0, Gi0, khi, zetax, zetay
 
     def case_2_initial_conditions(self):
+        dtype = self.dtype
         rho_max = 1.0
         p_max = 0.2
-        ux0 = torch.zeros((self.Y, self.X), device=self.device)  # fluid velocity in x
-        uy0 = torch.zeros((self.Y, self.X), device=self.device)  # fluid velocity in y
-        rho0 = torch.ones((self.Y, self.X), device=self.device)  # density
+        ux0 = torch.zeros((self.Y, self.X), device=self.device, dtype=dtype)
+        uy0 = torch.zeros((self.Y, self.X), device=self.device, dtype=dtype)
+        rho0 = torch.ones((self.Y, self.X), device=self.device, dtype=dtype)
         rho0[:, :self.Lx+1] = 1 * rho_max
         rho0[:, self.Lx+1:] = 0.125 * rho_max
-        P0 = torch.zeros((self.Y, self.X), device=self.device)  # pressure
+        P0 = torch.zeros((self.Y, self.X), device=self.device, dtype=dtype)
         P0[:, :self.Lx+1] = 1.0 * p_max
         P0[:, self.Lx+1:] = 0.1 * p_max
         T0 = P0/(rho0*self.R)
-        # Use torch.zeros on the correct device for Lagrange multipliers
-        khi0 = torch.zeros((self.Y, self.X), device=self.device)
-        zetax0 = torch.zeros((self.Y, self.X), device=self.device)
-        zetay0 = torch.zeros((self.Y, self.X), device=self.device)
-        Fi0 = self.get_Feq(rho0, ux0, uy0, T0)  # F_i population
-        Gi0, khi, zetax, zetay = self.get_Geq_Newton_solver(rho0, ux0, uy0, T0, khi0, zetax0, zetay0) # G_i population
-        Fi0 = Fi0.to(self.device)
-        Gi0 = Gi0.to(self.device)
+        khi0 = torch.zeros((self.Y, self.X), device=self.device, dtype=dtype)
+        zetax0 = torch.zeros((self.Y, self.X), device=self.device, dtype=dtype)
+        zetay0 = torch.zeros((self.Y, self.X), device=self.device, dtype=dtype)
+        Fi0 = self.get_Feq(rho0, ux0, uy0, T0)
+        Gi0, khi, zetax, zetay = self.get_Geq_Newton_solver(rho0, ux0, uy0, T0, khi0, zetax0, zetay0)
+        Fi0 = Fi0.to(self.device, dtype=dtype)
+        Gi0 = Gi0.to(self.device, dtype=dtype)
         del P0
         return Fi0, Gi0, khi, zetax, zetay
     
@@ -286,6 +287,9 @@ def main():
     parser.add_argument('--case', type=int, choices=[1, 2], help='Choose case 1 or 2', default=1)
     parser.add_argument("--plot", dest='plot', action='store_true', help='Plot the results', default=False)
     parser.add_argument("--compile", dest='compile', action='store_true', help='Compile the functions', default=False)
+    parser.add_argument('--newton-steps', type=int, default=15, help='Max Newton iterations for Geq solver')
+    parser.add_argument('--newton-tol', type=float, default=1e-6, help='Tolerance for Newton solver')
+    parser.add_argument('--precision', type=str, default='float32', choices=['float32', 'float16', 'bfloat16'], help='Precision for simulation')
     parser.set_defaults(save=True)
 
 

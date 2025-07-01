@@ -50,46 +50,6 @@ def multinv(M):
     X = np.reshape(X,((n,m)+sn[2:]),order ="F")
     return X'''
 
-def _multinv_torch_3x3(M, device=None):
-    """
-    Fast closed-form batched inverse for 3x3 matrices using PyTorch.
-    M: (..., 3, 3) tensor
-    Returns: (..., 3, 3) tensor of inverses
-    """
-    if device is not None:
-        M = M.to(device)
-    # Assume M shape (..., 3, 3)
-    a = M[..., 0, 0]
-    b = M[..., 0, 1]
-    c = M[..., 0, 2]
-    d = M[..., 1, 0]
-    e = M[..., 1, 1]
-    f = M[..., 1, 2]
-    g = M[..., 2, 0]
-    h = M[..., 2, 1]
-    i = M[..., 2, 2]
-    
-    A =   e * i - f * h
-    B = -(d * i - f * g)
-    C =   d * h - e * g
-    D = -(b * i - c * h)
-    E =   a * i - c * g
-    F = -(a * h - b * g)
-    G =   b * f - c * e
-    H = -(a * f - c * d)
-    I =   a * e - b * d
-    
-    det = a * A + b * B + c * C
-    # Avoid division by zero
-    det_safe = torch.where(torch.abs(det) < 1e-12, torch.ones_like(det), det)
-    inv = torch.stack([
-        torch.stack([A, D, G], dim=-1),
-        torch.stack([B, E, H], dim=-1),
-        torch.stack([C, F, I], dim=-1)
-    ], dim=-2) / det_safe.unsqueeze(-1).unsqueeze(-1)
-    # Set output to zero where det is zero (singular)
-    inv = torch.where(torch.abs(det).unsqueeze(-1).unsqueeze(-1) < 1e-12, torch.zeros_like(inv), inv)
-    return inv
 
 # Patch _multinv_torch to use the fast 3x3 version if possible
 def _multinv_torch(M, device=None):
@@ -103,21 +63,16 @@ def _multinv_torch(M, device=None):
     m, n = original_shape[0], original_shape[1]
     if m != n:
         raise ValueError('The first two dimensions of M must be m x m slices.')
-
-    # Fast path for 3x3
-    if m == 3 and n == 3:
-        # Move batch to end: (3,3,Y,X) -> (Y,X,3,3)
-        batch_shape = original_shape[2:]
-        M_batched = M_torch.permute(*range(2, len(original_shape)), 0, 1)
-        M_inv_batched = _multinv_torch_3x3(M_batched, device=device)
-        # Move back to (3,3,Y,X)
-        M_inv = M_inv_batched.permute(-2, -1, *range(0, len(batch_shape)))
-        return M_inv.cpu().numpy() if is_numpy else M_inv
-
-    # Generic path for other sizes
     permute_dims = list(range(2, len(original_shape))) + [0, 1]
     M_permuted = M_torch.permute(*permute_dims)
-    M_inv_permuted = torch.linalg.inv(M_permuted)
+
+    # Create a batch of identity matrices with the same batch dimensions as M_permuted.
+    batch_shape = M_permuted.shape[:-2]
+    I = torch.eye(m, dtype=M_permuted.dtype, device=M_permuted.device)
+    I_batch = I.expand(*batch_shape, m, m)
+    # Use the highly optimized, batched version of linalg.solve to find the inverse.
+    # This avoids any slow Python for-loops and is equivalent to linalg.inv.
+    M_inv_permuted = torch.linalg.solve(M_permuted, I_batch)
     inv_permute_dims = [len(original_shape) - 2, len(original_shape) - 1] + list(range(len(original_shape) - 2))
     M_inv = M_inv_permuted.permute(*inv_permute_dims)
     return M_inv.cpu().numpy() if is_numpy else M_inv
