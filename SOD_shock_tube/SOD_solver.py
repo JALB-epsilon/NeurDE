@@ -331,6 +331,21 @@ def main():
 
     initial_conditions_func = getattr(sod_solver, case_params['initial_conditions_func'])
     Fi0, Gi0, khi0, zetax0, zetay0 = initial_conditions_func()
+    # --- GPU Warm-up Phase ---
+    # Run a few dummy steps to warm up GPU and compile kernels before main loop
+    warmup_steps = 3
+    print("Warming up GPU with dummy steps...")
+    with torch.no_grad():
+        dummy_F = torch.zeros((sod_solver.Qn, sod_solver.Y, sod_solver.X), device=sod_solver.device)
+        dummy_G = torch.zeros((sod_solver.Qn, sod_solver.Y, sod_solver.X), device=sod_solver.device)
+        dummy_khi = torch.zeros((sod_solver.Y, sod_solver.X), device=sod_solver.device)
+        dummy_zetax = torch.zeros((sod_solver.Y, sod_solver.X), device=sod_solver.device)
+        dummy_zetay = torch.zeros((sod_solver.Y, sod_solver.X), device=sod_solver.device)
+        for _ in range(warmup_steps):
+            _ = sod_solver.step(dummy_F, dummy_G, dummy_khi, dummy_zetax, dummy_zetay)
+    print("GPU warm-up complete.")
+
+    
     all_rho = []
     all_ux = []
     all_uy = []
