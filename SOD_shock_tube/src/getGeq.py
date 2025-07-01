@@ -109,28 +109,37 @@ def levermore_Geq_torch(
     w[4:8, :, :] = T**2 * 0.25
     w[8, :, :] = (1 - T)**2
 
-    max_iterations = 20
+    max_iterations = 10
     tol = 1e-6
     # Batch-aware convergence mask: True = not yet converged
     mask = torch.ones((Y, X), dtype=torch.bool, device=device)
     for _ in range(max_iterations):
+        if not mask.any():  # Early exit if all points have converged
+            break
+
         # Only update non-converged points
         khi.masked_fill_((torch.abs(khi) < tol) & mask, 0)
         zetax.masked_fill_((torch.abs(zetax) < tol) & mask, 0)
         zetay.masked_fill_((torch.abs(zetay) < tol) & mask, 0)
 
-        f = w * torch.exp(khi[None, :, :] + zetax[None, :, :] * ex[:, None, None] + zetay[None, :, :] * ey[:, None, None])
+        exponent = khi[None, :, :] + zetax[None, :, :] * ex[:, None, None] + zetay[None, :, :] * ey[:, None, None]
+        f = w * torch.exp(exponent)
 
-        F = torch.zeros((3, Y, X), device=device, dtype=torch.float32)
-        f_sum = f.sum(dim=0)
-        F[0, :, :] = f_sum - 2 * E
-        F[1, :, :] = torch.einsum("q,qyx->yx", ex, f) - 2 * ux * H
-        F[2, :, :] = torch.einsum("q,qyx->yx", ey, f) - 2 * uy * H
+        # Precompute constant terms
+        f_sum = f.sum(dim=0)  # Sum over velocities
+        f_ex = torch.einsum("q,qyx->yx", ex, f)  # Weighted sum with ex
+        f_ey = torch.einsum("q,qyx->yx", ey, f)  # Weighted sum with ey
 
-        J = torch.zeros((3, 3, Y, X), device=device, dtype=torch.float32)
-        J[0, 0, :, :] = f_sum
-        J[0, 1, :, :] = F[1, :, :] + 2 * ux * H
-        J[0, 2, :, :] = F[2, :, :] + 2 * uy * H
+        # Construct residual vector F using precomputed terms
+        F = torch.zeros((3, Y, X), dtype=torch.float32, device=device)
+        F[0, :, :] = f_sum - 2 * E  # Equation for density
+        F[1, :, :] = f_ex - 2 * ux * H  # Equation for x-momentum
+        F[2, :, :] = f_ey - 2 * uy * H  # Equation for y-momentum
+
+        J = torch.zeros((3, 3, Y, X), dtype=torch.float32, device=device)
+        J[0, 0, :, :] = f_sum  # dF_0/d(khi)
+        J[0, 1, :, :] = f_ex  # dF_0/d(zetax)
+        J[0, 2, :, :] = f_ey  # dF_0/d(zetay)
         J[1, 0, :, :], J[2, 0, :, :] = J[0, 1, :, :], J[0, 2, :, :]
         J[1, 1, :, :] = torch.einsum("q,qyx->yx", ex**2, f)
         J[1, 2, :, :] = torch.einsum("q,qyx->yx", ex * ey, f)
@@ -150,9 +159,9 @@ def levermore_Geq_torch(
         dkhi = torch.abs(khi - khi1)
         dzetax = torch.abs(zetax - zetax1)
         dzetay = torch.abs(zetay - zetay1)
-        # Update mask: True = still not converged
-        mask = (dkhi > tol) | (dzetax > tol) | (dzetay > tol)
-        # Loop continues for all points, but only non-converged are updated
+        # Update mask: a point remains unconverged if it was previously unconverged
+        # AND its change in this step was greater than the tolerance.
+        mask &= (dkhi > tol) | (dzetax > tol) | (dzetay > tol)
 
     Feq = w * rho[None, :, :] * torch.exp(khi[None, :, :] + zetax[None, :, :] * ex[:, None, None] + zetay[None, :, :] * ey[:, None, None])
 
