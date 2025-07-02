@@ -73,8 +73,9 @@ from .multinv import _multinv_torch
 
     return Feq, khi, zetax, zetay'''
 
+
 def levermore_Geq_torch(
-    ex, ey, ux, uy, T, rho, Cv, Qn, khi, zetax, zetay, device=None, use_sparse=False
+   ex, ey, ux, uy, T, rho, Cv, Qn, khi, zetax, zetay, device=None, use_sparse=False
 ):
 
     if use_sparse:
@@ -85,7 +86,7 @@ def levermore_Geq_torch(
     if device is None:
         device = ux.device if not is_numpy else 'cpu'
 
-    # --- Optimized Tensor Conversion ("If Needed") ---
+
     tensors = [torch.as_tensor(v, dtype=torch.float32, device=device)
                for v in (ex, ey, ux, uy, T, rho, khi, zetax, zetay)]
     ex, ey, ux, uy, T, rho, khi, zetax, zetay = tensors
@@ -111,18 +112,19 @@ def levermore_Geq_torch(
 
     max_iterations = 10
     tol = 1e-6
-    # Batch-aware convergence mask: True = not yet converged
-    mask = torch.ones((Y, X), dtype=torch.bool, device=device)
-    for _ in range(max_iterations):
-        if not mask.any():  # Early exit if all points have converged
-            break
-
+    
+    # Use a fixed number of iterations with masked updates
+    converged = torch.zeros((Y, X), dtype=torch.bool, device=device)
+    
+    for iteration in range(max_iterations):
         # Only update non-converged points
-        khi.masked_fill_((torch.abs(khi) < tol) & mask, 0)
-        zetax.masked_fill_((torch.abs(zetax) < tol) & mask, 0)
-        zetay.masked_fill_((torch.abs(zetay) < tol) & mask, 0)
+        active_mask = ~converged
+        
+        khi_masked = torch.where(active_mask & (torch.abs(khi) < tol), 0, khi)
+        zetax_masked = torch.where(active_mask & (torch.abs(zetax) < tol), 0, zetax)
+        zetay_masked = torch.where(active_mask & (torch.abs(zetay) < tol), 0, zetay)
 
-        exponent = khi[None, :, :] + zetax[None, :, :] * ex[:, None, None] + zetay[None, :, :] * ey[:, None, None]
+        exponent = khi_masked[None, :, :] + zetax_masked[None, :, :] * ex[:, None, None] + zetay_masked[None, :, :] * ey[:, None, None]
         f = w * torch.exp(exponent)
 
         # Precompute constant terms
@@ -148,21 +150,22 @@ def levermore_Geq_torch(
 
         IJ = _multinv_torch(J, device=device)
 
-        khi1, zetax1, zetay1 = khi.clone(), zetax.clone(), zetay.clone()
+        khi_old, zetax_old, zetay_old = khi.clone(), zetax.clone(), zetay.clone()
         delta = torch.einsum('ijyx,jyx->iyx', IJ, F)
         
-        # Perform in-place updates only on the non-converged points for better memory efficiency.
-        khi[mask] -= delta[0][mask]
-        zetax[mask] -= delta[1][mask]
-        zetay[mask] -= delta[2][mask]
+        # Perform updates only on active points
+        khi = torch.where(active_mask, khi - delta[0], khi)
+        zetax = torch.where(active_mask, zetax - delta[1], zetax)
+        zetay = torch.where(active_mask, zetay - delta[2], zetay)
 
-        # Compute convergence for this step
-        dkhi = torch.abs(khi - khi1)
-        dzetax = torch.abs(zetax - zetax1)
-        dzetay = torch.abs(zetay - zetay1)
-        # Update mask: a point remains unconverged if it was previously unconverged
-        # AND its change in this step was greater than the tolerance.
-        mask &= (dkhi > tol) | (dzetax > tol) | (dzetay > tol)
+        # Update convergence status
+        dkhi = torch.abs(khi - khi_old)
+        dzetax = torch.abs(zetax - zetax_old)
+        dzetay = torch.abs(zetay - zetay_old)
+        
+        # Points converge if all deltas are below tolerance
+        newly_converged = (dkhi <= tol) & (dzetax <= tol) & (dzetay <= tol)
+        converged = converged | newly_converged
 
     Feq = w * rho[None, :, :] * torch.exp(khi[None, :, :] + zetax[None, :, :] * ex[:, None, None] + zetay[None, :, :] * ey[:, None, None])
 
