@@ -4,7 +4,7 @@ import numpy as np
 from src import F_pop_torch, levermore_Geq_torch
 from utilities import detach, get_device
 
-torch.set_float32_matmul_precision('high')
+# Note: matmul precision will be set conditionally based on precision argument
 
 
 class SODSolver(nn.Module):
@@ -30,6 +30,7 @@ class SODSolver(nn.Module):
         self.Uay = Uay
         self.device = device
         self.dtype = torch.get_default_dtype()
+        self.is_compiled = False  # Track if methods are compiled
         ex_values = [1, 0, -1, 0, 1, -1, -1, 1, 0]
         ey_values = [0, 1, 0, -1, 1, 1, -1, -1, 0]
         self.ex = torch.tensor(ex_values, dtype=self.dtype, device=self.device) + self.Uax
@@ -140,7 +141,8 @@ class SODSolver(nn.Module):
             T, rho,
             self.Cv, self.Qn,
             khi, zetax, zetay,
-            device=self.device
+            device=self.device,
+            allow_early_termination=not self.is_compiled
         )
         return Geq, khi, zetax, zetay
     
@@ -289,12 +291,24 @@ def main():
     parser.add_argument("--compile", dest='compile', action='store_true', help='Compile the functions', default=False)
     parser.add_argument('--newton-steps', type=int, default=15, help='Max Newton iterations for Geq solver')
     parser.add_argument('--newton-tol', type=float, default=1e-6, help='Tolerance for Newton solver')
-    parser.add_argument('--precision', type=str, default='float32', choices=['float32', 'float16', 'bfloat16'], help='Precision for simulation')
+    parser.add_argument('--precision', type=str, default='float64', choices=['float32', 'float64', 'float16', 'bfloat16'], help='Precision for simulation')
     parser.set_defaults(save=True)
 
 
     args = parser.parse_args()
     device = get_device(args.device)
+
+    # Set global torch dtype for precision
+    if args.precision == 'float16':
+        torch.set_default_dtype(torch.float16)
+    elif args.precision == 'bfloat16':
+        torch.set_default_dtype(torch.bfloat16)
+    elif args.precision == 'float64':
+        torch.set_default_dtype(torch.float64)
+    else:
+        torch.set_default_dtype(torch.float32)
+        # Enable TF32 for matmul if available for better performance (only for float32)
+        torch.set_float32_matmul_precision('high')
 
     with open("Sod_cases_param.yml", 'r') as f: 
         cases = yaml.load(f, Loader=yaml.FullLoader)    
@@ -328,6 +342,7 @@ def main():
         dummy_khi = torch.zeros(dummy_macro_shape, device=sod_solver.device)
         dummy_zetax = torch.zeros(dummy_macro_shape, device=sod_solver.device)
         dummy_zetay = torch.zeros(dummy_macro_shape, device=sod_solver.device)
+        sod_solver.is_compiled = True  # Set compilation flag
         sod_solver.step = torch.compile(sod_solver.step, fullgraph=True)
         # Precompile by running one dummy step
         with torch.no_grad():
