@@ -150,10 +150,11 @@ def levermore_Geq_torch(
 
         khi1, zetax1, zetay1 = khi.clone(), zetax.clone(), zetay.clone()
         delta = torch.einsum('ijyx,jyx->iyx', IJ, F)
-        # Only update non-converged points
-        khi = torch.where(mask, khi - delta[0], khi)
-        zetax = torch.where(mask, zetax - delta[1], zetax)
-        zetay = torch.where(mask, zetay - delta[2], zetay)
+        
+        # Perform in-place updates only on the non-converged points for better memory efficiency.
+        khi[mask] -= delta[0][mask]
+        zetax[mask] -= delta[1][mask]
+        zetay[mask] -= delta[2][mask]
 
         # Compute convergence for this step
         dkhi = torch.abs(khi - khi1)

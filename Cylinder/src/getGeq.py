@@ -166,10 +166,10 @@ def levermore_Geq_BCs(ex, ey, ux, uy, T, rho, Cv, Qn, khi, zetax, zetay, row, co
 
 def levermore_Geq_Obs(ex, ey, ux, uy, T, rho, Cv, Qn, khi, zetax, zetay, Obs):
     """Calculates Levermore equilibrium for observed points (optimized)."""
-    ux[np.abs(ux) < 1e-5] = 0
-    uy[np.abs(uy) < 1e-5] = 0
-    T[np.abs(T) < 1e-5] = 0
-    rho[np.abs(rho) < 1e-5] = 0
+    ux[np.abs(ux) < 1e-6] = 0
+    uy[np.abs(uy) < 1e-6] = 0
+    T[np.abs(T) < 1e-6] = 0
+    rho[np.abs(rho) < 1e-6] = 0
 
     ex = ex.squeeze()
     ey = ey.squeeze()
@@ -192,9 +192,9 @@ def levermore_Geq_Obs(ex, ey, ux, uy, T, rho, Cv, Qn, khi, zetax, zetay, Obs):
     F = np.zeros((3, len(L)))
     J = np.zeros((3, 3, len(L)))
     for _ in range(20):
-        khi[np.abs(khi) < 1e-5] = 0
-        zetax[np.abs(zetax) < 1e-5] = 0
-        zetay[np.abs(zetay) < 1e-5] = 0
+        khi[np.abs(khi) < 1e-6] = 0
+        zetax[np.abs(zetax) < 1e-6] = 0
+        zetay[np.abs(zetay) < 1e-6] = 0
 
         f = w * np.exp(khi[Obs] + zetax[None, Obs] * ex[:, None] + zetay[None, Obs] * ey[:, None])
 
