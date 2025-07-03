@@ -1,106 +1,151 @@
-import torch
 import numpy as np
+import torch
 from .multinv import _multinv_torch
+
+
 
 def levermore_Geq_torch(
     ex, ey, ux, uy, T, rho, Cv, Qn, khi, zetax, zetay, device=None, use_sparse=False
 ):
-
     if use_sparse:
         print("Warning: Sparse inversion is not supported in PyTorch. Using dense batched inversion instead.")
+    
     is_numpy = isinstance(ux, np.ndarray)
 
     # Determine target device
     if device is None:
         device = ux.device if not is_numpy else 'cpu'
 
-    # --- Optimized Tensor Conversion ("If Needed") ---
-    tensors = [torch.as_tensor(v, dtype=torch.float32, device=device)
+    # Convert all inputs to tensors (use default dtype)
+    tensors = [torch.as_tensor(v, device=device)
                for v in (ex, ey, ux, uy, T, rho, khi, zetax, zetay)]
     ex, ey, ux, uy, T, rho, khi, zetax, zetay = tensors
     Cv = float(Cv)
     Qn = int(Qn)
 
-    # Numerical stability
-    T.masked_fill_(torch.abs(T) < 1e-6, 0)
-    rho.masked_fill_(torch.abs(rho) < 1e-6, 0)
+    # Numerical stability - use clamp instead of masked_fill for safety
+    # Set very small values to zero for numerical stability (as in original numpy code)
+    T = torch.where(torch.abs(T) < 1e-6, torch.zeros_like(T), T)
+    rho = torch.where(torch.abs(rho) < 1e-6, torch.zeros_like(rho), rho)
 
     Y, X = ux.shape
-    ex = ex.squeeze()
-    ey = ey.squeeze()
+    
+    # Ensure ex, ey have the right shape
+    if ex.dim() > 1:
+        ex = ex.squeeze()
+    if ey.dim() > 1:
+        ey = ey.squeeze()
+    
+    # Ensure ex, ey are 1D with length Qn
+    if ex.numel() != Qn:
+        raise ValueError(f"ex must have {Qn} elements, got {ex.numel()}")
+    if ey.numel() != Qn:
+        raise ValueError(f"ey must have {Qn} elements, got {ey.numel()}")
 
+    # Compute macroscopic quantities
     uu = ux**2 + uy**2
     E = T * Cv + 0.5 * uu
     H = E + T
 
-    w = torch.zeros((Qn, Y, X), device=device, dtype=torch.float32)
-    w[:4, :, :] = (1 - T) * T * 0.5
-    w[4:8, :, :] = T**2 * 0.25
-    w[8, :, :] = (1 - T)**2
+    # Initialize weights - this seems to be a specific model choice
+    w = torch.zeros((Qn, Y, X), device=device)
+    
+    # Fill weights based on original logic (adjust if needed for your specific model)
+    if Qn >= 9:
+        w[:4, :, :] = (1 - T) * T * 0.5
+        w[4:8, :, :] = T**2 * 0.25
+        w[8, :, :] = (1 - T)**2
+        # Handle remaining weights if Qn > 9
+        if Qn > 9:
+            w[9:, :, :] = 0.1  # Default small value
+    else:
+        # Fallback for smaller Qn
+        w[:min(4, Qn), :, :] = (1 - T) * T * 0.5
 
-    max_iterations = 10
+    max_iterations = 20
     tol = 1e-6
-    # Batch-aware convergence mask: True = not yet converged
-    mask = torch.ones((Y, X), dtype=torch.bool, device=device)
-    for _ in range(max_iterations):
-        if not mask.any():  # Early exit if all points have converged
-            break
+    
+    for iteration in range(max_iterations):
+        # Apply small value thresholding (matching original)
+        khi = torch.where(torch.abs(khi) < tol, torch.zeros_like(khi), khi)
+        zetax = torch.where(torch.abs(zetax) < tol, torch.zeros_like(zetax), zetax)
+        zetay = torch.where(torch.abs(zetay) < tol, torch.zeros_like(zetay), zetay)
 
-        # Only update non-converged points
-        khi.masked_fill_((torch.abs(khi) < tol) & mask, 0)
-        zetax.masked_fill_((torch.abs(zetax) < tol) & mask, 0)
-        zetay.masked_fill_((torch.abs(zetay) < tol) & mask, 0)
-
-        exponent = khi[None, :, :] + zetax[None, :, :] * ex[:, None, None] + zetay[None, :, :] * ey[:, None, None]
+        # Compute exponent: shape should be (Qn, Y, X)
+        exponent = (khi[None, :, :] + 
+                   zetax[None, :, :] * ex[:, None, None] + 
+                   zetay[None, :, :] * ey[:, None, None])
+        
+        # Compute distribution function
         f = w * torch.exp(exponent)
 
-        # Precompute constant terms
-        f_sum = f.sum(dim=0)  # Sum over velocities
+        # Compute moments
+        f_sum = f.sum(dim=0)  # Sum over velocities: (Y, X)
         f_ex = torch.einsum("q,qyx->yx", ex, f)  # Weighted sum with ex
         f_ey = torch.einsum("q,qyx->yx", ey, f)  # Weighted sum with ey
 
-        # Construct residual vector F using precomputed terms
-        F = torch.zeros((3, Y, X), dtype=torch.float32, device=device)
-        F[0, :, :] = f_sum - 2 * E  # Equation for density
-        F[1, :, :] = f_ex - 2 * ux * H  # Equation for x-momentum
-        F[2, :, :] = f_ey - 2 * uy * H  # Equation for y-momentum
+        # Construct residual vector F
+        F = torch.zeros((3, Y, X), device=device)
+        F[0, :, :] = f_sum - 2 * E  # Mass conservation
+        F[1, :, :] = f_ex - 2 * ux * H  # X-momentum conservation  
+        F[2, :, :] = f_ey - 2 * uy * H  # Y-momentum conservation
 
-        J = torch.zeros((3, 3, Y, X), dtype=torch.float32, device=device)
+        # Construct Jacobian matrix
+        J = torch.zeros((3, 3, Y, X), device=device)
+        
+        # First row: derivatives of mass equation
         J[0, 0, :, :] = f_sum  # dF_0/d(khi)
-        J[0, 1, :, :] = f_ex  # dF_0/d(zetax)
-        J[0, 2, :, :] = f_ey  # dF_0/d(zetay)
-        J[1, 0, :, :], J[2, 0, :, :] = J[0, 1, :, :], J[0, 2, :, :]
-        J[1, 1, :, :] = torch.einsum("q,qyx->yx", ex**2, f)
-        J[1, 2, :, :] = torch.einsum("q,qyx->yx", ex * ey, f)
-        J[2, 1, :, :] = J[1, 2, :, :]
-        J[2, 2, :, :] = torch.einsum("q,qyx->yx", ey**2, f)
+        J[0, 1, :, :] = f_ex   # dF_0/d(zetax)
+        J[0, 2, :, :] = f_ey   # dF_0/d(zetay)
+        
+        # Second row: derivatives of x-momentum equation
+        J[1, 0, :, :] = f_ex   # dF_1/d(khi)  
+        J[1, 1, :, :] = torch.einsum("q,qyx->yx", ex**2, f)  # dF_1/d(zetax)
+        J[1, 2, :, :] = torch.einsum("q,qyx->yx", ex * ey, f)  # dF_1/d(zetay)
+        
+        # Third row: derivatives of y-momentum equation
+        J[2, 0, :, :] = f_ey   # dF_2/d(khi)
+        J[2, 1, :, :] = J[1, 2, :, :]  # dF_2/d(zetax)
+        J[2, 2, :, :] = torch.einsum("q,qyx->yx", ey**2, f)  # dF_2/d(zetay)
 
-        IJ = _multinv_torch(J, device=device)
+        # Transpose J to get proper shape (Y, X, 3, 3) for batch inversion
+        J_transposed = J.permute(2, 3, 0, 1)  # (Y, X, 3, 3)
+        
+        # Compute inverse Jacobian
+        IJ_transposed = _multinv_torch(J_transposed, device=device)  # (Y, X, 3, 3)
+        
+        # Transpose back to (3, 3, Y, X)
+        IJ = IJ_transposed.permute(2, 3, 0, 1)
 
-        khi1, zetax1, zetay1 = khi.clone(), zetax.clone(), zetay.clone()
-        delta = torch.einsum('ijyx,jyx->iyx', IJ, F)
+        # Store old values for convergence check
+        khi_old, zetax_old, zetay_old = khi.clone(), zetax.clone(), zetay.clone()
+        
+        # Compute Newton step (matching original calculation)
+        khi -= (IJ[0, 0] * F[0] + IJ[0, 1] * F[1] + IJ[0, 2] * F[2])
+        zetax -= (IJ[1, 0] * F[0] + IJ[1, 1] * F[1] + IJ[1, 2] * F[2])
+        zetay -= (IJ[2, 0] * F[0] + IJ[2, 1] * F[1] + IJ[2, 2] * F[2])
 
-        # Perform in-place updates only on the non-converged points.
-        # This can be more memory-efficient than creating new tensors with torch.where.
-        khi[mask] -= delta[0][mask]
-        zetax[mask] -= delta[1][mask]
-        zetay[mask] -= delta[2][mask]
-        # Compute convergence for this step
-        dkhi = torch.abs(khi - khi1)
-        dzetax = torch.abs(zetax - zetax1)
-        dzetay = torch.abs(zetay - zetay1)
-        # Update mask: a point remains unconverged if it was previously unconverged
-        # AND its change in this step was greater than the tolerance.
-        mask &= (dkhi > tol) | (dzetax > tol) | (dzetay > tol)
+        # Check convergence (matching original)
+        dkhi = torch.abs(khi - khi_old)
+        dzetax = torch.abs(zetax - zetax_old)
+        dzetay = torch.abs(zetay - zetay_old)
+        
+        # Check max change (matching original logic) - only break if allowed
+        mx = torch.max(torch.stack([dkhi.max(), dzetax.max(), dzetay.max()]))
+        if mx < 1e-6:
+            break
 
-    Feq = w * rho[None, :, :] * torch.exp(khi[None, :, :] + zetax[None, :, :] * ex[:, None, None] + zetay[None, :, :] * ey[:, None, None])
+    # Compute final equilibrium distribution
+    final_exponent = (khi[None, :, :] + 
+                     zetax[None, :, :] * ex[:, None, None] + 
+                     zetay[None, :, :] * ey[:, None, None])
+    
+    Feq = w * rho[None, :, :] * torch.exp(final_exponent)
 
     if is_numpy:
         return Feq.cpu().numpy(), khi.cpu().numpy(), zetax.cpu().numpy(), zetay.cpu().numpy()
     else:
         return Feq, khi, zetax, zetay
-
-
 
 
 def levermore_Geq_BCs_torch(
@@ -113,11 +158,10 @@ def levermore_Geq_BCs_torch(
     if device is None:
         device = ux.device if not is_numpy else 'cpu'
     # Convert all to torch tensors
-    tensors = [torch.as_tensor(v, dtype=torch.float32, device=device) for v in (ex, ey, ux, uy, T, rho, khi, zetax, zetay)]
+    tensors = [torch.as_tensor(v, device=device) for v in (ex, ey, ux, uy, T, rho, khi, zetax, zetay)]
     ex, ey, ux, uy, T, rho, khi, zetax, zetay = tensors
     Cv = float(Cv)
     Qn = int(Qn)
-    eps = 1e-12
 
     # Ensure all fields are 2D (Y, X)
     if ux.ndim == 1:
@@ -144,7 +188,7 @@ def levermore_Geq_BCs_torch(
     H = E + T
 
     # Precompute weights only at boundary points
-    w = torch.zeros((Qn, R), device=device, dtype=torch.float32)
+    w = torch.zeros((Qn, R), device=device)
     one_minus_T = 1 - T[row, col]
     w[:4, :] = one_minus_T * T[row, col] * 0.5
     w[4:8, :] = T[row, col] ** 2 * 0.25
@@ -161,8 +205,8 @@ def levermore_Geq_BCs_torch(
 
     max_iterations = 20
     tol = 1e-6
-    mask = torch.ones(R, dtype=torch.bool, device=device)
-    for _ in range(max_iterations):
+    
+    for iteration in range(max_iterations):
         # Numerical stability
         khi_b = torch.where(torch.abs(khi_b) < tol, torch.zeros_like(khi_b), khi_b)
         zetax_b = torch.where(torch.abs(zetax_b) < tol, torch.zeros_like(zetax_b), zetax_b)
@@ -175,12 +219,12 @@ def levermore_Geq_BCs_torch(
         ex_dot_f = torch.matmul(ex, f)
         ey_dot_f = torch.matmul(ey, f)
 
-        F = torch.zeros((3, R), device=device, dtype=torch.float32)
+        F = torch.zeros((3, R), device=device)
         F[0, :] = f_sum - 2 * E[row, col]
         F[1, :] = ex_dot_f - 2 * ux_b * H[row, col]
         F[2, :] = ey_dot_f - 2 * uy_b * H[row, col]
 
-        J = torch.zeros((3, 3, R), device=device, dtype=torch.float32)
+        J = torch.zeros((3, 3, R), device=device)
         J[0, 0, :] = f_sum
         J[0, 1, :] = ex_dot_f
         J[0, 2, :] = ey_dot_f
@@ -191,20 +235,23 @@ def levermore_Geq_BCs_torch(
         J[2, 1, :] = J[1, 2, :]
         J[2, 2, :] = torch.matmul(ey ** 2, f)
 
-        IJ = _multinv_torch(J, device=device)
-        khi1 = khi_b.clone()
-        zetax1 = zetax_b.clone()
-        zetay1 = zetay_b.clone()
+        # Transpose J to get proper shape for batch inversion
+        J_transposed = J.permute(2, 0, 1)  # (R, 3, 3)
+        IJ_transposed = _multinv_torch(J_transposed, device=device)
+        IJ = IJ_transposed.permute(1, 2, 0)  # Back to (3, 3, R)
+        
+        # Store old values for convergence check
+        khi_old, zetax_old, zetay_old = khi_b.clone(), zetax_b.clone(), zetay_b.clone()
 
-        delta = torch.einsum('ijr,jr->ir', IJ, F)
-        khi_b = khi_b - delta[0]
-        zetax_b = zetax_b - delta[1]
-        zetay_b = zetay_b - delta[2]
+        # Compute Newton step
+        khi_b -= (IJ[0, 0] * F[0] + IJ[0, 1] * F[1] + IJ[0, 2] * F[2])
+        zetax_b -= (IJ[1, 0] * F[0] + IJ[1, 1] * F[1] + IJ[1, 2] * F[2])
+        zetay_b -= (IJ[2, 0] * F[0] + IJ[2, 1] * F[1] + IJ[2, 2] * F[2])
 
         # Convergence check
-        dkhi = torch.abs((khi_b - khi1) / (khi1 + eps))
-        dzetax = torch.abs((zetax_b - zetax1) / (zetax1 + eps))
-        dzetay = torch.abs((zetay_b - zetay1) / (zetay1 + eps))
+        dkhi = torch.abs(khi_b - khi_old).max()
+        dzetax = torch.abs(zetax_b - zetax_old).max()
+        dzetay = torch.abs(zetay_b - zetay_old).max()
         mx = torch.max(torch.stack([dkhi, dzetax, dzetay]))
         if mx < 1e-6:
             break
@@ -235,13 +282,12 @@ def levermore_Geq_Obs_torch(
     if device is None:
         device = ux.device if not is_numpy else 'cpu'
     # Convert all to torch tensors
-    tensors = [torch.as_tensor(v, dtype=torch.float32, device=device)
+    tensors = [torch.as_tensor(v, device=device)
                for v in (ex, ey, ux, uy, T, rho, khi, zetax, zetay)]
     ex, ey, ux, uy, T, rho, khi, zetax, zetay = tensors
     Obs = torch.as_tensor(Obs, dtype=torch.bool, device=device)
     Cv = float(Cv)
     Qn = int(Qn)
-    eps = 1e-12
 
     # Numerical stability
     ux = torch.where(torch.abs(ux) < 1e-5, torch.zeros_like(ux), ux)
@@ -275,7 +321,8 @@ def levermore_Geq_Obs_torch(
 
     max_iterations = 20
     tol = 1e-6
-    for _ in range(max_iterations):
+    
+    for iteration in range(max_iterations):
         # Numerical stability
         khi_b = torch.where(torch.abs(khi_b) < tol, torch.zeros_like(khi_b), khi_b)
         zetax_b = torch.where(torch.abs(zetax_b) < tol, torch.zeros_like(zetax_b), zetax_b)
@@ -304,20 +351,23 @@ def levermore_Geq_Obs_torch(
         J[2, 1, :] = J[1, 2, :]
         J[2, 2, :] = torch.matmul(ey ** 2, f)
 
-        IJ = _multinv_torch(J, device=device)
-        khi1 = khi_b.clone()
-        zetax1 = zetax_b.clone()
-        zetay1 = zetay_b.clone()
+        # Transpose J to get proper shape for batch inversion
+        J_transposed = J.permute(2, 0, 1)  # (L, 3, 3)
+        IJ_transposed = _multinv_torch(J_transposed, device=device)
+        IJ = IJ_transposed.permute(1, 2, 0)  # Back to (3, 3, L)
+        
+        # Store old values for convergence check
+        khi_old, zetax_old, zetay_old = khi_b.clone(), zetax_b.clone(), zetay_b.clone()
 
-        delta = torch.einsum('ijr,jr->ir', IJ, F)
-        khi_b = khi_b - delta[0]
-        zetax_b = zetax_b - delta[1]
-        zetay_b = zetay_b - delta[2]
+        # Compute Newton step
+        khi_b -= (IJ[0, 0] * F[0] + IJ[0, 1] * F[1] + IJ[0, 2] * F[2])
+        zetax_b -= (IJ[1, 0] * F[0] + IJ[1, 1] * F[1] + IJ[1, 2] * F[2])
+        zetay_b -= (IJ[2, 0] * F[0] + IJ[2, 1] * F[1] + IJ[2, 2] * F[2])
 
         # Convergence check
-        dkhi = torch.abs((khi_b - khi1) / (khi1 + eps))
-        dzetax = torch.abs((zetax_b - zetax1) / (zetax1 + eps))
-        dzetay = torch.abs((zetay_b - zetay1) / (zetay1 + eps))
+        dkhi = torch.abs(khi_b - khi_old).max()
+        dzetax = torch.abs(zetax_b - zetax_old).max()
+        dzetay = torch.abs(zetay_b - zetay_old).max()
         mx = torch.max(torch.stack([dkhi, dzetax, dzetay]))
         if mx < 1e-6:
             break

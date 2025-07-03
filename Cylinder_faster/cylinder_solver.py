@@ -37,19 +37,19 @@ class Cylinder_base(nn.Module):
         self.Ma0 = Ma0
         self.Re = Re
         self.device = device
-        ex_values = [1, 0, -1, 0, 1, -1, -1, 1, 0]
-        ey_values = [0, 1, 0, -1, 1, 1, -1, -1, 0]
+        ex_values = [1.0, 0.0, -1.0, 0.0, 1.0, -1.0, -1.0, 1.0, 0.0]
+        ey_values = [0.0, 1.0, 0.0, -1.0, 1.0, 1.0, -1.0, -1.0, 0.0]
         self.get_shift_constants()
-        self.ex = torch.tensor(ex_values, dtype=torch.float32, device=self.device) + self.Uax
-        self.ey = torch.tensor(ey_values, dtype=torch.float32, device=self.device) + self.Uay
-        self.ex1 = torch.tensor(ex_values, dtype=torch.float32, device=self.device)
-        self.ey1 = torch.tensor(ey_values, dtype=torch.float32, device=self.device)
+        self.ex = torch.tensor(ex_values, device=self.device) + self.Uax
+        self.ey = torch.tensor(ey_values, device=self.device) + self.Uay
+        self.ex1 = torch.tensor(ex_values, device=self.device)
+        self.ey1 = torch.tensor(ey_values, device=self.device)
         del ex_values, ey_values
         self.get_derived_quantities()
         self.create_obstacle()
 
     def get_shift_constants(self):
-        self.cs0 = torch.sqrt(torch.tensor(self.vuy*self.T0, dtype=torch.float32, device=self.device)) # speed of sound
+        self.cs0 = torch.sqrt(torch.tensor(self.vuy*self.T0, device=self.device)) # speed of sound
         self.U0 = self.Ma0 * self.cs0 #far field velocity
         #defining the shift
         self.Uax = self.U0*self.Ns
@@ -379,6 +379,18 @@ class Cylinder_base(nn.Module):
         Fi_new, Gi_new = self.enforce_Obs_and_BC(Fi, Gi, Fi_obs_cyl, Gi_obs_cyl, Fi_obs_Inlet, Gi_obs_Inlet)
         return Fi_new, Gi_new, khi, zetax, zetay, rho, ux, uy, T, Feq, Geq, Fi_obs_cyl, Gi_obs_cyl, Fi_obs_Inlet, Gi_obs_Inlet
 
+    def update_tensor_dtypes(self):
+        """Update tensor dtypes to match the current default dtype"""
+        target_dtype = torch.get_default_dtype()
+        self.ex = self.ex.to(dtype=target_dtype)
+        self.ey = self.ey.to(dtype=target_dtype)
+        self.ex1 = self.ex1.to(dtype=target_dtype)
+        self.ey1 = self.ey1.to(dtype=target_dtype)
+        self.cs0 = self.cs0.to(dtype=target_dtype)
+        self.ex2 = self.ex2.to(dtype=target_dtype)
+        self.ey2 = self.ey2.to(dtype=target_dtype)
+        self.exey = self.exey.to(dtype=target_dtype)
+
 def main():
     import argparse
     import os
@@ -392,7 +404,7 @@ def main():
     parser.add_argument('--steps', type=int, default=1000)
     parser.add_argument('--save', dest='save', action='store_true', help='Save file in database')
     parser.add_argument('--no-save', dest='save', action='store_false', help='Do not save file in database')
-    parser.add_argument('--precision', type=str, default='float32', choices=['float32', 'float16', 'bfloat16'], help='Precision for torch tensors')
+    parser.add_argument('--precision', type=str, default='float32', choices=['float32', 'float64', 'float16', 'bfloat16'], help='Precision for torch tensors')
     parser.add_argument('--compile', dest='compile', action='store_true', help='Compile the functions', default=False)
     parser.add_argument('--plot', dest='plot', action='store_true', help='Plot the results', default=False)
     parser.set_defaults(save=True)
@@ -405,10 +417,12 @@ def main():
         torch.set_default_dtype(torch.float16)
     elif args.precision == 'bfloat16':
         torch.set_default_dtype(torch.bfloat16)
+    elif args.precision == 'float64':
+        torch.set_default_dtype(torch.float64)
     else:
         torch.set_default_dtype(torch.float32)
-        # Enable TF32 for matmul if available for better performance
-        torch.set_float32_matmul_precision('high')
+        # Enable TF32 for matmul if available for better performance (float32 only)
+        torch.backends.cuda.matmul.allow_tf32 = True
 
     # Set device string for torch
     if isinstance(device, str):
@@ -442,6 +456,9 @@ def main():
         Ns=config['Ns'],
         device=device_str
     )
+    
+    # Update tensor dtypes to match the global dtype setting
+    cylinder_solver.update_tensor_dtypes()
 
     Fi0, Gi0, khi0, zetax0, zetay0 = cylinder_solver.initial_conditions()
 

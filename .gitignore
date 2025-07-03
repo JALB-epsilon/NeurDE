@@ -5,3 +5,4 @@ Cylinder/torch_solver_not_working/*
 *.pt
 SOD_shock_tube/experiments_ant_check_code.py
 SOD_shock_tube/Sod_cases_param_training.yml
+Cylinder_faster/src/getGeq_backup.py
