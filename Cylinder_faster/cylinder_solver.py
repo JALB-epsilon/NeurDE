@@ -428,7 +428,7 @@ def main():
     if isinstance(device, str):
         device_str = device
     elif isinstance(device, int):
-        device_str = f'cuda:{device}' if device > 0 else 'cpu'
+        device_str = f'cuda:{device}' if device >= 0 else 'cpu'
     elif hasattr(device, 'type'):
         device_str = str(device)
     else:

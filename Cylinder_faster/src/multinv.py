@@ -1,8 +1,21 @@
 import numpy as np
 import torch
 
+def _multinv_torch(M):
+    """Ultra-fast 3x3 matrix inverse for torch.compile"""
+    # Minimal regularization
+    reg_val = 1e-12
+    m = M.shape[-1]
+    eye = torch.eye(m, dtype=M.dtype, device=M.device)
+    
+    if M.dim() > 2:
+        eye = eye.expand_as(M)
+    
+    M_reg = M + reg_val * eye
+    return torch.linalg.solve(M_reg, eye)
 
 
+'''
 # Patch _multinv_torch to use the fast 3x3 version if possible
 def _multinv_torch(M, device=None):
     """Matrix inverse function with proper batching support"""
@@ -44,7 +57,7 @@ def _multinv_torch(M, device=None):
     # Solve for inverse
     M_inv = torch.linalg.solve(M_reg, I)
 
-    return M_inv.cpu().numpy() if is_numpy else M_inv
+    return M_inv.cpu().numpy() if is_numpy else M_inv'''
 
 
 '''from scipy import sparse

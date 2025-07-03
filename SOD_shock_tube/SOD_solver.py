@@ -141,9 +141,7 @@ class SODSolver(nn.Module):
             T, rho,
             self.Cv, self.Qn,
             khi, zetax, zetay,
-            device=self.device,
-            allow_early_termination=not self.is_compiled
-        )
+            device=self.device)
         return Geq, khi, zetax, zetay
     
     def get_maxwellian_pressure_tensor(self, rho, ux, uy, T):
@@ -343,7 +341,7 @@ def main():
         dummy_zetax = torch.zeros(dummy_macro_shape, device=sod_solver.device)
         dummy_zetay = torch.zeros(dummy_macro_shape, device=sod_solver.device)
         sod_solver.is_compiled = True  # Set compilation flag
-        sod_solver.step = torch.compile(sod_solver.step, fullgraph=True)
+        sod_solver.step = torch.compile(sod_solver.step)
         # Precompile by running one dummy step
         with torch.no_grad():
             sod_solver.step(dummy_F, dummy_G, dummy_khi, dummy_zetax, dummy_zetay)
