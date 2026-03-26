@@ -1,0 +1,23 @@
+X: 401
+Qn: 9
+lattice: D2Q9
+equilibrium_mode: upwind
+lam: 1.0
+omega: 1.3
+domain_length: 1.0
+boundary: riemann
+u_left: 1.0
+u_right: 0.0
+x0: 0.2
+data_dir: data_base/burgers_case_d2q9_1000.h5
+results_dir: results_d2q9_train200of1000
+hidden_dim: 32
+num_layers: 3
+newton_steps: 50
+newton_tol: 1.0e-10
+logit_clip: 15.0
+conservative_output: true
+train:
+  epochs: 200
+  lr: 0.001
+  batch_size: 64

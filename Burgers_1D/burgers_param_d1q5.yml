@@ -1,0 +1,20 @@
+X: 401
+Qn: 5
+lattice: D1Q5
+lam: 1.0
+omega: 1.4
+domain_length: 1.0
+boundary: riemann
+u_left: 1.0
+u_right: 0.0
+x0: 0.2
+data_dir: data_base/burgers_case_d1q5.h5
+results_dir: results_d1q5
+hidden_dim: 32
+num_layers: 3
+newton_steps: 50
+newton_tol: 1.0e-10
+train:
+  epochs: 200
+  lr: 0.001
+  batch_size: 64

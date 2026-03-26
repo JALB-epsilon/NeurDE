@@ -6,28 +6,38 @@
   enforce_sod_symmetry: false
   feq_nullspace_gamma_mode: fixed
   feq_nullspace_gamma: 1.0
+  geq_mode: conservative
   geq_nullspace_gamma_mode: fixed
   geq_nullspace_gamma: 1.0
-  geq_mode: learned
-  learn_feq: true
+  learn_feq: false
   data_dir: data_base/SOD_case1.h5
   stage1:
-    geq_mode: learned
+    learn_feq: false
+    geq_mode: conservative
+    feq_nullspace_gamma_mode: fixed
+    feq_nullspace_gamma: 1.0
+    geq_nullspace_gamma_mode: fixed
+    geq_nullspace_gamma: 1.0
     epochs: 3000
     lr: 0.0001
-    model_dir: results/case1/stage1
+    geq_moment_weight: 0.1
+    model_dir: /home/jx24/NeurDE/SOD_shock_tube/results_local/case1/stage1_geq_conservative_gamma1_nosym
     scheduler: CosineAnnealingWarmRestarts
     scheduler_config:
       CosineAnnealingWarmRestarts:
-        T_0: 1500 
+        T_0: 1500
         T_mult: 2
         eta_min: 0.000005
   stage2:
-    geq_mode: learned
+    learn_feq: false
+    geq_mode: conservative
+    feq_nullspace_gamma_mode: fixed
+    feq_nullspace_gamma: 1.0
+    geq_nullspace_gamma_mode: fixed
+    geq_nullspace_gamma: 1.0
     epochs: 1000
     lr: 0.0001
-    model_dir: results/case1/stage2
-    scheduler: OneCycleLR
+    model_dir: /home/jx24/NeurDE/SOD_shock_tube/results_local/case1/stage2_geq_conservative_gamma1_nosym
     N: 25
     batch_size: 4
     rollout_start: 25
@@ -36,9 +46,11 @@
     loss_target: equilibrium
     plot_frequency: 25
     benchmark_steps: 25
+    geq_moment_weight: 0.1
+    scheduler: OneCycleLR
     scheduler_config:
       OneCycleLR:
-        max_lr: 0.0005  
+        max_lr: 0.0005
         pct_start: 0.3
         div_factor: 10
         final_div_factor: 100
@@ -51,30 +63,38 @@
   enforce_sod_symmetry: false
   feq_nullspace_gamma_mode: fixed
   feq_nullspace_gamma: 1.0
+  geq_mode: conservative
   geq_nullspace_gamma_mode: fixed
   geq_nullspace_gamma: 1.0
-  geq_mode: learned
-  learn_feq: true
+  learn_feq: false
   data_dir: data_base/SOD_case2.h5
   stage1:
     learn_feq: false
-    geq_mode: learned
+    geq_mode: conservative
+    feq_nullspace_gamma_mode: fixed
+    feq_nullspace_gamma: 1.0
+    geq_nullspace_gamma_mode: fixed
+    geq_nullspace_gamma: 1.0
     epochs: 3000
     lr: 0.0001
     geq_moment_weight: 0.1
-    model_dir: results/case2/stage1_geq_moment
+    model_dir: /home/jx24/NeurDE/SOD_shock_tube/results_local/case2/stage1_geq_conservative_gamma1_nosym
     scheduler: CosineAnnealingWarmRestarts
     scheduler_config:
       CosineAnnealingWarmRestarts:
-        T_0: 1500 
+        T_0: 1500
         T_mult: 2
         eta_min: 0.000005
   stage2:
     learn_feq: false
-    geq_mode: learned
+    geq_mode: conservative
+    feq_nullspace_gamma_mode: fixed
+    feq_nullspace_gamma: 1.0
+    geq_nullspace_gamma_mode: fixed
+    geq_nullspace_gamma: 1.0
     epochs: 1000
     lr: 1.0e-5
-    model_dir: results/case2/stage2_geq_only_moment_loss_bg
+    model_dir: /home/jx24/NeurDE/SOD_shock_tube/results_local/case2/stage2_geq_conservative_gamma1_nosym
     N: 100
     batch_size: 4
     rollout_start: 1
@@ -85,24 +105,24 @@
       - rollout: 2
         batches: 500
       - rollout: 4
-        batches: 500
-      - rollout: 8
-        batches: 500
-      - rollout: 16
-        batches: 500
-      - rollout: 25
-        batches: 500
-      - rollout: 50
         batches: 1000
+      - rollout: 8
+        batches: 2000
+      - rollout: 16
+        batches: 6000
+      - rollout: 25
+        batches: 4000
+      - rollout: 50
+        batches: 3000
       - rollout: 100
         batches: 0
-    detach_interval: 25
+    detach_interval: 16
     loss_stride: 1
     loss_stride_schedule:
       - stride: 1
-        batches: 3000
+        batches: 14000
       - stride: 2
-        batches: 1000
+        batches: 3000
       - stride: 4
         batches: 0
     feq_collision_mix_start: 1.0
@@ -114,17 +134,23 @@
     geq_moment_weight: 0.1
     grad_clip_norm: 0.5
     skip_nonfinite_batches: true
-    TVD: True
-    tvd_weight: 5.0
-    curvature_weight: 2.0
+    TVD: true
+    tvd_weight: 10.0
+    curvature_weight: 4.0
     rollout_source: predicted
     loss_target: analytic_macro
     plot_frequency: 25
     benchmark_steps: 100
+    long_rollout_eval: true
+    long_rollout_eval_frequency: 5
+    long_rollout_eval_min_rollout: 16
+    long_rollout_eval_start: 500
+    long_rollout_eval_steps: 500
+    long_rollout_save_top_k: 3
     scheduler: OneCycleLR
     scheduler_config:
       OneCycleLR:
-        max_lr: 1.0e-4 
+        max_lr: 1.0e-4
         pct_start: 0.3
         div_factor: 10
         final_div_factor: 100
