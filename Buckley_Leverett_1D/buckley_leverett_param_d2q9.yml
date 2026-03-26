@@ -17,6 +17,8 @@ hidden_dim: 32
 num_layers: 3
 newton_steps: 50
 newton_tol: 1.0e-10
+logit_clip: 15.0
+conservative_output: true
 train:
   epochs: 200
   lr: 0.001

@@ -21,6 +21,7 @@ def main():
         config = yaml.safe_load(stream)
     data_path = resolve_module_path(config["data_dir"])
     model_path = resolve_module_path(args.model_path)
+    conservative_output = config.get("conservative_output", config.get("match_mass", True))
 
     with h5py.File(data_path, "r") as handle:
         u_ref = torch.tensor(handle["u"][: args.steps], dtype=torch.float32)
@@ -46,6 +47,8 @@ def main():
         activation="relu",
         learn_feq=True,
         learn_geq=False,
+        logit_clip=config.get("logit_clip", 15.0),
+        conservative_output=conservative_output,
     ).to(args.device)
     model.load_state_dict(torch.load(model_path, map_location=args.device))
     model.eval()
@@ -63,7 +66,10 @@ def main():
             target = u_ref[step].to(args.device)
             rel_error += (torch.norm(u - target) / (torch.norm(target) + 1e-7)).item()
 
-    print(f"Average rollout relative error over {args.steps} LWR steps: {rel_error / max(args.steps, 1):.6f}")
+    print(
+        f"Average rollout relative error over {args.steps} LWR steps: "
+        f"{rel_error / max(args.steps, 1):.6f}; conservative_output={conservative_output}"
+    )
 
 
 if __name__ == "__main__":

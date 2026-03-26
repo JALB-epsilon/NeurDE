@@ -22,6 +22,7 @@ def main():
         config = yaml.safe_load(stream)
     data_path = resolve_module_path(config["data_dir"])
     results_dir = resolve_module_path(config["results_dir"])
+    conservative_output = config.get("conservative_output", config.get("match_mass", True))
 
     with h5py.File(data_path, "r") as handle:
         u = torch.tensor(handle["u"][: args.num_samples], dtype=torch.float32)
@@ -52,11 +53,17 @@ def main():
         activation="relu",
         learn_feq=True,
         learn_geq=False,
+        logit_clip=config.get("logit_clip", 15.0),
+        conservative_output=conservative_output,
     ).to(args.device)
 
     basis = solver.basis().to(args.device)
     optimizer = torch.optim.Adam(model.parameters(), lr=config["train"]["lr"])
     os.makedirs(results_dir, exist_ok=True)
+    print(
+        f"Training LWR on {u.shape[0]} snapshots "
+        f"(conservative_output={conservative_output}, logit_clip={config.get('logit_clip', 15.0)})"
+    )
 
     for epoch in range(config["train"]["epochs"]):
         epoch_loss = 0.0
