@@ -6,8 +6,10 @@ __pycache__/
 *.h5
 *.pt
 *.log
-**/results*/
+**/results*
+**/images
 **/images/
+**/data_base
 **/data_base/
 Cylinder/torch_solver_not_working/*
 SOD_shock_tube/experiments_ant_check_code.py
