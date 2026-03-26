@@ -46,6 +46,19 @@ def exact_burgers_riemann(x, t, u_left, u_right, x0):
     return result
 
 
+def burgers_sinusoidal_initial(x, mean, amplitude, wavenumber=1.0, phase=0.0, domain_length=1.0):
+    x = np.asarray(x, dtype=np.float64)
+    phase_argument = (2.0 * np.pi * float(wavenumber) * x / float(domain_length)) + float(phase)
+    return (float(mean) + float(amplitude) * np.sin(phase_argument)).astype(np.float64)
+
+
+def burgers_sinusoidal_shock_time(amplitude, wavenumber=1.0, domain_length=1.0):
+    slope_scale = 2.0 * np.pi * abs(float(amplitude)) * abs(float(wavenumber)) / float(domain_length)
+    if slope_scale <= 1.0e-14:
+        return np.inf
+    return 1.0 / slope_scale
+
+
 class BurgersSolver(nn.Module):
     def __init__(
         self,
