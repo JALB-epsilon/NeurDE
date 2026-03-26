@@ -50,9 +50,7 @@ def calculate_relative_error(pred, target):
 
 
 def calculate_geq_moment_loss(pred_population, flat_macro_state, basis, cv, eps=1.0e-7):
-    basis = basis.to(device=pred_population.device, dtype=pred_population.dtype)
-    ex = basis[:, 0]
-    ey = basis[:, 1]
+    del basis
 
     rho = flat_macro_state[:, 0]
     ux = flat_macro_state[:, 1]
@@ -60,20 +58,15 @@ def calculate_geq_moment_loss(pred_population, flat_macro_state, basis, cv, eps=
     T = flat_macro_state[:, 3]
 
     E = cv * T + 0.5 * (ux * ux + uy * uy)
-    H = E + T
 
     pred_m0 = pred_population.sum(dim=-1)
-    pred_mx = pred_population @ ex
-    pred_my = pred_population @ ey
 
     target_m0 = 2.0 * rho * E
-    target_mx = 2.0 * rho * ux * H
-    target_my = 2.0 * rho * uy * H
 
     def _relative(pred, target):
         return torch.norm(pred - target) / (torch.norm(target) + eps)
 
-    return (_relative(pred_m0, target_m0) + _relative(pred_mx, target_mx) + _relative(pred_my, target_my)) / 3.0
+    return _relative(pred_m0, target_m0)
 
 
 def reshape_equilibrium_target(target):

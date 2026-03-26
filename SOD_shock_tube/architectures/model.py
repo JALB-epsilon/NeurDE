@@ -44,13 +44,9 @@ def project_conserved_moments(flat_population, flat_macro_state, basis, nullspac
 
 
 def project_energy_moments(flat_population, flat_macro_state, basis, cv, nullspace_gamma=1.0):
-    basis = basis.to(device=flat_population.device, dtype=flat_population.dtype)
-    ex = basis[:, 0]
-    ey = basis[:, 1]
-    ones = torch.ones_like(ex)
-
-    moment_basis = torch.stack([ones, ex, ey], dim=0)
-    gram = moment_basis @ moment_basis.transpose(0, 1)
+    del basis
+    ones = torch.ones((1, flat_population.shape[-1]), device=flat_population.device, dtype=flat_population.dtype)
+    gram = ones @ ones.transpose(0, 1)
     gram_inv = torch.linalg.inv(gram)
 
     rho = flat_macro_state[:, 0]
@@ -58,28 +54,13 @@ def project_energy_moments(flat_population, flat_macro_state, basis, cv, nullspa
     uy = flat_macro_state[:, 2]
     T = flat_macro_state[:, 3]
     E = cv * T + 0.5 * (ux.square() + uy.square())
-    H = E + T
 
-    target_moments = torch.stack(
-        [
-            2.0 * rho * E,
-            2.0 * rho * ux * H,
-            2.0 * rho * uy * H,
-        ],
-        dim=-1,
-    )
-    predicted_moments = torch.stack(
-        [
-            flat_population.sum(dim=-1),
-            flat_population @ ex,
-            flat_population @ ey,
-        ],
-        dim=-1,
-    )
+    target_moments = (2.0 * rho * E).unsqueeze(-1)
+    predicted_moments = flat_population.sum(dim=-1, keepdim=True)
     raw_row_coeffs = predicted_moments @ gram_inv.transpose(0, 1)
-    raw_row_component = raw_row_coeffs @ moment_basis
+    raw_row_component = raw_row_coeffs @ ones
     target_row_coeffs = target_moments @ gram_inv.transpose(0, 1)
-    target_row_component = target_row_coeffs @ moment_basis
+    target_row_component = target_row_coeffs @ ones
     nullspace_component = flat_population - raw_row_component
     gamma = _resolve_nullspace_gamma(nullspace_gamma, flat_population)
     return target_row_component + gamma * nullspace_component
