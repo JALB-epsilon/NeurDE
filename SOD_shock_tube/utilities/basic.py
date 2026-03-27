@@ -55,17 +55,22 @@ def TVD_norm(U_new, U_old):
     if U_new.ndim < 2:
         raise ValueError("Input tensors must have at least 2 dimensions.")
 
-    diff_new = U_new[2, 1:] - U_new[2, :-1]
-    diff_old = U_old[2, 1:] - U_old[2, :-1]
+    if U_new.ndim == 2:
+        diff_new = U_new[2, 1:] - U_new[2, :-1]
+        diff_old = U_old[2, 1:] - U_old[2, :-1]
+        TV_new = torch.abs(diff_new).sum()
+        TV_old = torch.abs(diff_old).sum()
+        TVD = F.relu(TV_new - TV_old) ** 2
+        TVD = torch.where(TVD <= 1e-7, torch.tensor(0.0, device=TVD.device), TVD)
+        return TVD
 
-    TV_new = torch.abs(diff_new).sum()
-    TV_old = torch.abs(diff_old).sum()
-
-    TVD = F.relu(TV_new - TV_old)**2
-
+    diff_new = U_new[:, 2, 1:] - U_new[:, 2, :-1]
+    diff_old = U_old[:, 2, 1:] - U_old[:, 2, :-1]
+    TV_new = torch.abs(diff_new).sum(dim=-1)
+    TV_old = torch.abs(diff_old).sum(dim=-1)
+    TVD = F.relu(TV_new - TV_old) ** 2
     TVD = torch.where(TVD <= 1e-7, torch.tensor(0.0, device=TVD.device), TVD)
-
-    return TVD
+    return TVD.mean()
 
 def tvd_weight_scheduler(epoch, milestones, weights):
     """

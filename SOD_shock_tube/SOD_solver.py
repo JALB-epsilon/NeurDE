@@ -11,6 +11,15 @@ def _as_solver_tensor(value, dtype, device):
     return torch.as_tensor(value, dtype=dtype, device=device)
 
 
+def _stack_batch_results(results):
+    first = results[0]
+    if torch.is_tensor(first):
+        return torch.stack(results, dim=0)
+    if isinstance(first, tuple):
+        return tuple(_stack_batch_results([result[idx] for result in results]) for idx in range(len(first)))
+    raise TypeError(f"Unsupported batch result type: {type(first)!r}")
+
+
 class SODSolver(nn.Module):
     def __init__(self, X=3001, Y=5, Qn=9,
                  alpha1=1.2,
@@ -82,16 +91,22 @@ class SODSolver(nn.Module):
         return qx, qy
         
     def get_density(self, F): 
-        rho = torch.sum(F, dim=0).to(self.device)
+        pop_dim = 1 if F.dim() == 4 else 0
+        rho = torch.sum(F, dim=pop_dim).to(self.device)
         return rho
     
     def get_momentum(self, F): 
+        if F.dim() == 4:
+            rho_ux = torch.sum(F * self.ex.view(1, self.Qn, 1, 1), dim=1).to(self.device)
+            rho_uy = torch.sum(F * self.ey.view(1, self.Qn, 1, 1), dim=1).to(self.device)
+            return rho_ux, rho_uy
         rho_ux = torch.tensordot(self.ex, F, dims=([0], [0])).to(self.device)
         rho_uy = torch.tensordot(self.ey, F, dims=([0], [0])).to(self.device)
         return rho_ux, rho_uy
     
     def get_energy_density(self, G):
-        rho_E = torch.sum(G, dim=0).to(self.device)
+        pop_dim = 1 if G.dim() == 4 else 0
+        rho_E = torch.sum(G, dim=pop_dim).to(self.device)
         return rho_E
     
     def get_macroscopic(self, F, G):
@@ -105,35 +120,60 @@ class SODSolver(nn.Module):
         return rho, ux, uy, E
     
     def get_w(self, T):
-        w = torch.zeros((self.Qn, self.Y, self.X)).to(self.device)
+        if T.dim() == 3:
+            w = torch.zeros((T.shape[0], self.Qn, self.Y, self.X), device=self.device, dtype=T.dtype)
+        else:
+            w = torch.zeros((self.Qn, self.Y, self.X), device=self.device, dtype=T.dtype)
         one_minus_T = 1 - T
-        w[:4, :, :] = one_minus_T * T *0.5
-        w[4:8, :, :] = T**2 *0.25
-        w[8, :, :] = one_minus_T**2
+        w[..., :4, :, :] = (one_minus_T * T * 0.5).unsqueeze(-3)
+        w[..., 4:8, :, :] = (T**2 * 0.25).unsqueeze(-3)
+        w[..., 8, :, :] = one_minus_T**2
         del one_minus_T
         return w    
     
     def get_relaxation_time(self, rho, T, F, Feq):
         tau_DL = self.muy / (rho * T) + 0.5
         diff = torch.abs(F - Feq) / Feq
-        EPS = diff.mean(dim=0)
+        pop_dim = 1 if F.dim() == 4 else 0
+        EPS = diff.mean(dim=pop_dim)
         alpha = torch.ones_like(EPS)
         alpha = torch.where(EPS < 0.01, torch.tensor(1.0, device=EPS.device), alpha)
         alpha = torch.where(EPS < 0.1, torch.tensor(self.alpha01, device=EPS.device), alpha)
         alpha = torch.where(EPS < 1, torch.tensor(self.alpha1, device=EPS.device), alpha)
         alpha = torch.where(EPS >= 1, 1 / tau_DL, alpha)  
         tau_EPS = alpha * tau_DL
-        tau = tau_EPS.reshape(1, self.Y, self.X).expand(self.Qn, self.Y, self.X)
+        if F.dim() == 4:
+            tau = tau_EPS.unsqueeze(1).expand(-1, self.Qn, self.Y, self.X)
+        else:
+            tau = tau_EPS.reshape(1, self.Y, self.X).expand(self.Qn, self.Y, self.X)
         tauT = 0.5 + (tau - 0.5) / self.Pr
         omega = 1 / tau
         omegaT = 1 / tauT
         return omega, omegaT
     
     def get_Feq(self, rho, ux, uy, T):
+        if rho.dim() == 3:
+            return _stack_batch_results([
+                self.get_Feq(rho[idx], ux[idx], uy[idx], T[idx])
+                for idx in range(rho.shape[0])
+            ])
         Feq = F_pop_torch.compute_Feq(rho, ux, self.Uax, uy, self.Uay, T, Q=self.Qn)
         return Feq
     
     def get_Geq_Newton_solver(self, rho, ux, uy, T, khi, zetax, zetay):
+        if rho.dim() == 3:
+            return _stack_batch_results([
+                self.get_Geq_Newton_solver(
+                    rho[idx],
+                    ux[idx],
+                    uy[idx],
+                    T[idx],
+                    khi[idx],
+                    zetax[idx],
+                    zetay[idx],
+                )
+                for idx in range(rho.shape[0])
+            ])
         dtype = rho.dtype
         khi = _as_solver_tensor(khi, dtype, self.device)
         zetax = _as_solver_tensor(zetax, dtype, self.device)
@@ -163,6 +203,12 @@ class SODSolver(nn.Module):
         return P_Maxw_xx, P_Maxw_yy, P_Maxw_xy
     
     def get_pressure_tensor(self, F):
+        if F.dim() == 4:
+            P_xx = torch.sum(F * self.ex2.view(1, self.Qn, 1, 1), dim=1).to(self.device)
+            P_yy = torch.sum(F * self.ey2.view(1, self.Qn, 1, 1), dim=1).to(self.device)
+            P_xy = torch.sum(F * self.exey.view(1, self.Qn, 1, 1), dim=1).to(self.device)
+            del F
+            return P_xx, P_yy, P_xy
         P_xx = torch.tensordot(self.ex2, F, dims=([0], [0])).to(self.device)
         P_yy = torch.tensordot(self.ey2, F, dims=([0], [0])).to(self.device)
         P_xy = torch.tensordot(self.exey, F, dims=([0], [0])).to(self.device)
@@ -185,23 +231,43 @@ class SODSolver(nn.Module):
     def from_macro_to_lattice_Gis(self,F, rho, ux, uy, T):
         w = self.get_w(T)
         qsx, qsy = self.get_qs(F, rho, ux, uy, T)
-        Gis = w * (qsx * self.ex[:, None, None] + qsy * self.ey[:, None, None]) / T[None, :, :]
+        if F.dim() == 4:
+            Gis = w * (
+                qsx.unsqueeze(1) * self.ex.view(1, self.Qn, 1, 1)
+                + qsy.unsqueeze(1) * self.ey.view(1, self.Qn, 1, 1)
+            ) / T.unsqueeze(1)
+        else:
+            Gis = w * (qsx * self.ex[:, None, None] + qsy * self.ey[:, None, None]) / T[None, :, :]
         del w, qsx, qsy
         return Gis
     
     def interpolate_domain(self, Fo, Go):
         # Inverse distance interpolation
         div = (1 + 2 * self.Uax)
-        Fo1 = torch.zeros((self.Qn, self.Y, self.X)).to(self.device)
-        Go1 = torch.zeros((self.Qn, self.Y, self.X)).to(self.device)
-        Fo1[:, :, 1:self.X] = Fo[:, :, 1:self.X] * (1 - self.Uax) + Fo[:, :, 0:self.X - 1] * self.Uax
-        Go1[:, :, 1:self.X] = Go[:, :, 1:self.X] * (1 - self.Uax) + Go[:, :, 0:self.X - 1] * self.Uax
-        Fo1[:, :, 0] = (Fo[:, :, 1] * self.Uax + Fo[:, :, 0] * (1 + self.Uax)) / div
-        Go1[:, :, 0] = (Go[:, :, 1] * self.Uax + Go[:, :, 0] * (1 + self.Uax)) / div
+        Fo1 = torch.zeros_like(Fo)
+        Go1 = torch.zeros_like(Go)
+        Fo1[..., 1:self.X] = Fo[..., 1:self.X] * (1 - self.Uax) + Fo[..., 0:self.X - 1] * self.Uax
+        Go1[..., 1:self.X] = Go[..., 1:self.X] * (1 - self.Uax) + Go[..., 0:self.X - 1] * self.Uax
+        Fo1[..., 0] = (Fo[..., 1] * self.Uax + Fo[..., 0] * (1 + self.Uax)) / div
+        Go1[..., 0] = (Go[..., 1] * self.Uax + Go[..., 0] * (1 + self.Uax)) / div
         del div
         return Fo1, Go1
                
     def collision(self, F, G, Feq, Geq, rho, ux, uy, T ):
+        if F.dim() == 4:
+            return _stack_batch_results([
+                self.collision(
+                    F[idx],
+                    G[idx],
+                    Feq[idx],
+                    Geq[idx],
+                    rho[idx],
+                    ux[idx],
+                    uy[idx],
+                    T[idx],
+                )
+                for idx in range(F.shape[0])
+            ])
         omega, omegaT = self.get_relaxation_time(rho, T, F, Feq)
         Gis = self.from_macro_to_lattice_Gis(F, rho, ux, uy, T)
         F_pos_collision = F - omega * (F - Feq)
@@ -210,11 +276,21 @@ class SODSolver(nn.Module):
         return F_pos_collision, G_pos_collision
     
     def shift_operator(self, F, G):
+        if F.dim() == 4:
+            return _stack_batch_results([
+                self.shift_operator(F[idx], G[idx])
+                for idx in range(F.shape[0])
+            ])
         Fi = F[self.q_indices, self.Y_indices, self.X_indices]
         Gi = G[self.q_indices, self.Y_indices, self.X_indices]       
         return Fi, Gi
     
     def streaming(self, F_pos_coll, G_pos_coll):
+        if F_pos_coll.dim() == 4:
+            return _stack_batch_results([
+                self.streaming(F_pos_coll[idx], G_pos_coll[idx])
+                for idx in range(F_pos_coll.shape[0])
+            ])
         Fo1, Go1 = self.interpolate_domain(F_pos_coll, G_pos_coll)
         Fi, Gi = self.shift_operator(Fo1, Go1)      
         # boundary conditions

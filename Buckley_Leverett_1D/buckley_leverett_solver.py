@@ -29,6 +29,15 @@ def resolve_module_path(path):
     return os.path.join(MODULE_DIR, path)
 
 
+def _stack_batch_results(results):
+    first = results[0]
+    if torch.is_tensor(first):
+        return torch.stack(results, dim=0)
+    if isinstance(first, tuple):
+        return tuple(_stack_batch_results([result[idx] for result in results]) for idx in range(len(first)))
+    raise TypeError(f"Unsupported batch result type: {type(first)!r}")
+
+
 def initial_riemann(x, u_left, u_right, x0):
     return np.where(x <= x0, u_left, u_right).astype(np.float64)
 
@@ -141,6 +150,8 @@ class BuckleyLeverettSolver(nn.Module):
         return u**2 / denom
 
     def equilibrium_newton(self, u):
+        if u.dim() > 1:
+            return _stack_batch_results([self.equilibrium_newton(u[idx]) for idx in range(u.shape[0])])
         eps = 1e-8
         target_mass = u.clamp(0.0, 1.0)
         target_flux = self.flux(target_mass)
@@ -181,6 +192,8 @@ class BuckleyLeverettSolver(nn.Module):
         return equilibrium
 
     def equilibrium(self, u):
+        if u.dim() > 1:
+            return _stack_batch_results([self.equilibrium(u[idx]) for idx in range(u.shape[0])])
         if self.lattice == "D1Q2":
             flux = self.flux(u)
             f_minus = 0.5 * (u - flux / self.lam)
@@ -189,7 +202,7 @@ class BuckleyLeverettSolver(nn.Module):
         return self.equilibrium_newton(u)
 
     def macro(self, F):
-        return F.sum(dim=0)
+        return F.sum(dim=-2)
 
     def boundary_equilibrium(self, u_value, dtype):
         if u_value is None:
@@ -201,6 +214,8 @@ class BuckleyLeverettSolver(nn.Module):
         return F - self.omega * (F - Feq)
 
     def streaming(self, F):
+        if F.dim() > 2:
+            return _stack_batch_results([self.streaming(F[idx]) for idx in range(F.shape[0])])
         streamed = torch.empty_like(F)
         left_eq = None
         right_eq = None

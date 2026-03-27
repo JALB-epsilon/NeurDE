@@ -29,6 +29,15 @@ def resolve_module_path(path):
     return os.path.join(MODULE_DIR, path)
 
 
+def _stack_batch_results(results):
+    first = results[0]
+    if torch.is_tensor(first):
+        return torch.stack(results, dim=0)
+    if isinstance(first, tuple):
+        return tuple(_stack_batch_results([result[idx] for result in results]) for idx in range(len(first)))
+    raise TypeError(f"Unsupported batch result type: {type(first)!r}")
+
+
 def initial_riemann(x, rho_left, rho_right, x0):
     return np.where(x <= x0, rho_left, rho_right).astype(np.float64)
 
@@ -129,6 +138,8 @@ class LWRSolver(nn.Module):
         return self.v_free * rho * (1.0 - rho / self.rho_max)
 
     def equilibrium_newton(self, rho):
+        if rho.dim() > 1:
+            return _stack_batch_results([self.equilibrium_newton(rho[idx]) for idx in range(rho.shape[0])])
         eps = 1e-8
         target_mass = rho.clamp(0.0, self.rho_max)
         target_flux = self.flux(target_mass)
@@ -169,6 +180,8 @@ class LWRSolver(nn.Module):
         return equilibrium
 
     def equilibrium(self, rho):
+        if rho.dim() > 1:
+            return _stack_batch_results([self.equilibrium(rho[idx]) for idx in range(rho.shape[0])])
         if self.lattice == "D1Q2":
             flux = self.flux(rho)
             f_minus = 0.5 * (rho - flux / self.lam)
@@ -177,7 +190,7 @@ class LWRSolver(nn.Module):
         return self.equilibrium_newton(rho)
 
     def macro(self, F):
-        return F.sum(dim=0)
+        return F.sum(dim=-2)
 
     def boundary_equilibrium(self, rho_value, dtype):
         if rho_value is None:
@@ -189,6 +202,8 @@ class LWRSolver(nn.Module):
         return F - self.omega * (F - Feq)
 
     def streaming(self, F):
+        if F.dim() > 2:
+            return _stack_batch_results([self.streaming(F[idx]) for idx in range(F.shape[0])])
         streamed = torch.empty_like(F)
         left_eq = None
         right_eq = None

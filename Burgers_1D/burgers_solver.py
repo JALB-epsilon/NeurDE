@@ -38,6 +38,15 @@ def resolve_stabilizer_kwargs(config):
     }
 
 
+def _stack_batch_results(results):
+    first = results[0]
+    if torch.is_tensor(first):
+        return torch.stack(results, dim=0)
+    if isinstance(first, tuple):
+        return tuple(_stack_batch_results([result[idx] for result in results]) for idx in range(len(first)))
+    raise TypeError(f"Unsupported batch result type: {type(first)!r}")
+
+
 def exact_burgers_riemann(x, t, u_left, u_right, x0):
     if t <= 0:
         return np.where(x <= x0, u_left, u_right)
@@ -164,6 +173,8 @@ class BurgersSolver(nn.Module):
         return float(x0) if float(x0) <= self.domain_length else float(x0) * self.dx
 
     def equilibrium_newton(self, u):
+        if u.dim() > 1:
+            return _stack_batch_results([self.equilibrium_newton(u[idx]) for idx in range(u.shape[0])])
         eps = 1e-8
         target_mass = u.clamp_min(0.0)
         target_flux = 0.5 * target_mass**2
@@ -208,6 +219,8 @@ class BurgersSolver(nn.Module):
         return equilibrium
 
     def equilibrium(self, u):
+        if u.dim() > 1:
+            return _stack_batch_results([self.equilibrium(u[idx]) for idx in range(u.shape[0])])
         u = self.stabilize_macro(u)
         if self.lattice == "D1Q3":
             return self.equilibrium_d1q3(u)
@@ -221,6 +234,8 @@ class BurgersSolver(nn.Module):
         return self.equilibrium_newton(u)
 
     def equilibrium_d1q3_with_mode(self, u, mode):
+        if u.dim() > 1:
+            return _stack_batch_results([self.equilibrium_d1q3_with_mode(u[idx], mode) for idx in range(u.shape[0])])
         if mode in ("default", "centered"):
             f_plus = 0.5 * self.alpha * u + (u**2) / (4.0 * self.lam)
             f_zero = (1.0 - self.alpha) * u
@@ -235,9 +250,13 @@ class BurgersSolver(nn.Module):
         raise ValueError(f"Unsupported D1Q3 equilibrium mode: {mode}")
 
     def equilibrium_d1q3(self, u):
+        if u.dim() > 1:
+            return _stack_batch_results([self.equilibrium_d1q3(u[idx]) for idx in range(u.shape[0])])
         return self.equilibrium_d1q3_with_mode(u, self.equilibrium_mode)
 
     def equilibrium_d2q9(self, u):
+        if u.dim() > 1:
+            return _stack_batch_results([self.equilibrium_d2q9(u[idx]) for idx in range(u.shape[0])])
         selected_mode = "upwind" if self.equilibrium_mode == "default" else self.equilibrium_mode
         if selected_mode in ("centered", "upwind"):
             reduced_equilibrium = self.equilibrium_d1q3_with_mode(u, selected_mode)
@@ -258,6 +277,8 @@ class BurgersSolver(nn.Module):
         raise ValueError(f"Unsupported D2Q9 equilibrium mode: {self.equilibrium_mode}")
 
     def equilibrium_moment_d1q3(self, u):
+        if u.dim() > 1:
+            return _stack_batch_results([self.equilibrium_moment_d1q3(u[idx]) for idx in range(u.shape[0])])
         m1 = u
         m2 = 0.5 * u**2
         if self.equilibrium_mode in ("default", "centered"):
@@ -269,7 +290,7 @@ class BurgersSolver(nn.Module):
         return torch.stack([m1, m2, m3], dim=0)
 
     def macro(self, F):
-        return F.sum(dim=0)
+        return F.sum(dim=-2)
 
     def boundary_equilibrium(self, u_value, dtype):
         if u_value is None:
@@ -283,6 +304,13 @@ class BurgersSolver(nn.Module):
         return F - self.omega * (F - Feq)
 
     def collision_d1q3(self, F, Feq=None):
+        if F.dim() > 2:
+            if Feq is None:
+                return _stack_batch_results([self.collision_d1q3(F[idx]) for idx in range(F.shape[0])])
+            return _stack_batch_results([
+                self.collision_d1q3(F[idx], Feq[idx])
+                for idx in range(F.shape[0])
+            ])
         if Feq is None:
             Feq = self.equilibrium(self.macro(F))
         moments = torch.einsum("ab,bx->ax", self.M, F)
@@ -294,6 +322,8 @@ class BurgersSolver(nn.Module):
         return torch.einsum("ab,bx->ax", self.M_inv, moments_star)
 
     def streaming(self, F):
+        if F.dim() > 2:
+            return _stack_batch_results([self.streaming(F[idx]) for idx in range(F.shape[0])])
         streamed = torch.empty_like(F)
         left_eq = None
         right_eq = None
