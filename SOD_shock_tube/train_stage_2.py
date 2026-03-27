@@ -78,7 +78,8 @@ if __name__ == "__main__":
                                     number_of_rollout=number_of_rollout,
                                     )
 
-    dataloader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=4, pin_memory=True)  # batch size 1 to get each sequence.
+    stage2_batch_size = param_training["stage2"].get("batch_size", 1)
+    dataloader = DataLoader(dataset, batch_size=stage2_batch_size, shuffle=False, num_workers=4, pin_memory=True)
 
  
     val_dataset = SodDataset_stage2(F = all_F[args.num_samples:args.num_samples+100],
@@ -145,12 +146,6 @@ if __name__ == "__main__":
     epochs_since_last_save = [0] * 3
     last_epoch_loss = 0.0
 
-    # Get the first batch from the dataloader
-    first_batch = next(iter(dataloader))
-    Fi0, Gi0, Feq_seq, Geq_seq = first_batch
-    Fi0 = Fi0[0, 0, ...].to(device)
-    Gi0 = Gi0[0, 0, ...].to(device)
-
     if args.TVD:
         print("Using TVD")
         if args.compile:
@@ -159,43 +154,48 @@ if __name__ == "__main__":
     for epoch in tqdm(range(epochs), desc="Epochs"):
         loss_epoch = 0
         if args.TVD:
-            ux_old = torch.zeros_like(Fi0[1, ...])
-            T_old = torch.zeros_like(Fi0[1, ...])
-            rho_old = torch.zeros_like(Fi0[1, ...])
-            if args.TVD:
-                tvd_weight = 15
+            tvd_weight = 15
         for batch_idx, (F_seq, G_seq, Feq_seq, Geq_seq) in enumerate(dataloader):
             optimizer.zero_grad()
             model.train()
-            total_loss = 0
+            total_loss = torch.zeros((), device=device)
             F_seq = F_seq.to(device)
             G_seq = G_seq.to(device)
-            Fi0 = F_seq[0, 0, ...]
-            Gi0 = G_seq[0, 0, ...]
-            for rollout in range(number_of_rollout):       
-                rho, ux, uy, E = sod_solver.get_macroscopic(Fi0, Gi0)
-                T = sod_solver.get_temp_from_energy(ux, uy, E)
-                Feq = sod_solver.get_Feq(rho, ux, uy, T)
-                inputs = torch.stack([rho.unsqueeze(0), ux.unsqueeze(0), uy.unsqueeze(0), T.unsqueeze(0)], dim=1).to(device)
-                Geq_pred = model(inputs, basis)
-                Geq_target = Geq_seq[0, rollout].to(device)
-                inner_loss = loss_func(Geq_pred, Geq_target.permute(1, 2, 0).reshape(-1, 9))
-                total_loss += inner_loss
-                if args.TVD and rollout > 0:
-                    loss_TVD = TVD_norm(T, T_old)+TVD_norm(ux, ux_old)+TVD_norm(rho, rho_old)
-                    ux_old = ux.clone()
-                    T_old = T.clone()
-                    rho_old = rho.clone()
-                    total_loss += tvd_weight*loss_TVD
-                Fi0, Gi0 = sod_solver.collision(Fi0, Gi0, Feq, Geq_pred.permute(1, 0).reshape(sod_solver.Qn, sod_solver.Y, sod_solver.X), rho, ux, uy, T)
-                Fi, Gi = sod_solver.streaming(Fi0, Gi0)
-                Fi0 = Fi.detach()
-                Gi0 = Gi.detach()
+            batch_size = F_seq.shape[0]
+            for sample_idx in range(batch_size):
+                Fi0 = F_seq[sample_idx, 0, ...]
+                Gi0 = G_seq[sample_idx, 0, ...]
+                sample_loss = torch.zeros((), device=device)
+                if args.TVD:
+                    ux_old = torch.zeros_like(Fi0[1, ...])
+                    T_old = torch.zeros_like(Fi0[1, ...])
+                    rho_old = torch.zeros_like(Fi0[1, ...])
+                for rollout in range(number_of_rollout):
+                    rho, ux, uy, E = sod_solver.get_macroscopic(Fi0, Gi0)
+                    T = sod_solver.get_temp_from_energy(ux, uy, E)
+                    Feq = sod_solver.get_Feq(rho, ux, uy, T)
+                    inputs = torch.stack([rho.unsqueeze(0), ux.unsqueeze(0), uy.unsqueeze(0), T.unsqueeze(0)], dim=1).to(device)
+                    Geq_pred = model(inputs, basis)
+                    Geq_target = Geq_seq[sample_idx, rollout].to(device)
+                    inner_loss = loss_func(Geq_pred, Geq_target.permute(1, 2, 0).reshape(-1, 9))
+                    sample_loss = sample_loss + inner_loss
+                    if args.TVD and rollout > 0:
+                        loss_TVD = TVD_norm(T, T_old) + TVD_norm(ux, ux_old) + TVD_norm(rho, rho_old)
+                        ux_old = ux.clone()
+                        T_old = T.clone()
+                        rho_old = rho.clone()
+                        sample_loss = sample_loss + tvd_weight * loss_TVD
+                    Fi0, Gi0 = sod_solver.collision(Fi0, Gi0, Feq, Geq_pred.permute(1, 0).reshape(sod_solver.Qn, sod_solver.Y, sod_solver.X), rho, ux, uy, T)
+                    Fi, Gi = sod_solver.streaming(Fi0, Gi0)
+                    Fi0 = Fi
+                    Gi0 = Gi
+                total_loss = total_loss + sample_loss / float(number_of_rollout)
+            total_loss = total_loss / float(batch_size)
             total_loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
             loss_epoch += total_loss.item()
-            print(f"Epoch: {epoch}, Batch ID: {batch_idx}, Loss: {total_loss.item()/number_of_rollout:.6f}")
+            print(f"Epoch: {epoch}, Batch ID: {batch_idx}, Loss: {total_loss.item():.6f}")
 
         scheduler.step()
 
@@ -224,8 +224,8 @@ if __name__ == "__main__":
                 val_loss += inner_loss
                 Fi0, Gi0 = sod_solver.collision(Fi0, Gi0, Feq, Geq_pred.permute(1, 0).reshape(sod_solver.Qn, sod_solver.Y, sod_solver.X), rho, ux, uy, T)
                 Fi, Gi = sod_solver.streaming(Fi0, Gi0)
-                Fi0 = Fi.detach()
-                Gi0 = Gi.detach()
+                Fi0 = Fi
+                Gi0 = Gi
             val_loss /= len(val_dataset)
             print("-" * 50)
             print(f"Validation Loss: {val_loss:.6f}")

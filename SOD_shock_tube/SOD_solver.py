@@ -1,8 +1,14 @@
 import torch
 import torch.nn as nn
 import numpy as np
-from src import F_pop_torch, levermore_Geq
+from src import F_pop_torch, levermore_Geq, levermore_Geq_torch
 from utilities import detach, get_device
+
+
+def _as_solver_tensor(value, dtype, device):
+    if torch.is_tensor(value):
+        return value.to(device=device, dtype=dtype)
+    return torch.as_tensor(value, dtype=dtype, device=device)
 
 
 class SODSolver(nn.Module):
@@ -115,7 +121,7 @@ class SODSolver(nn.Module):
         alpha = torch.where(EPS < 0.01, torch.tensor(1.0, device=EPS.device), alpha)
         alpha = torch.where(EPS < 0.1, torch.tensor(self.alpha01, device=EPS.device), alpha)
         alpha = torch.where(EPS < 1, torch.tensor(self.alpha1, device=EPS.device), alpha)
-        alpha = torch.where(EPS >= 1, (1/tau_DL).clone().detach(), alpha)  
+        alpha = torch.where(EPS >= 1, 1 / tau_DL, alpha)  
         tau_EPS = alpha * tau_DL
         tau = tau_EPS.reshape(1, self.Y, self.X).expand(self.Qn, self.Y, self.X)
         tauT = 0.5 + (tau - 0.5) / self.Pr
@@ -128,26 +134,24 @@ class SODSolver(nn.Module):
         return Feq
     
     def get_Geq_Newton_solver(self, rho, ux, uy, T, khi, zetax, zetay):
-        # Convert tensors to numpy arrays
-        rho_np = detach(rho) if not isinstance(rho, np.ndarray) else rho
-        ux_np = detach(ux) if not isinstance(ux, np.ndarray) else ux
-        uy_np = detach(uy) if not isinstance(uy, np.ndarray) else uy
-        T_np = detach(T) if not isinstance(T, np.ndarray) else T
-        khi = detach(khi) if not isinstance(khi, np.ndarray) else khi
-        zetax = detach(zetax) if not isinstance(zetax, np.ndarray) else zetax
-        zetay = detach(zetay) if not isinstance(zetay, np.ndarray) else zetay 
-        # Compute Geq, khi, zetax, zetay using levermore_Geq
-        Geq_np, khi, zetax, zetay = levermore_Geq(
-                                                detach(self.ex), detach(self.ey),
-                                                ux_np, uy_np,
-                                                 T_np, rho_np,
-                                                self.Cv, self.Qn,
-                                                khi, zetax, zetay
-                                            ) 
-        # Convert back to torch tensors
-        Geq = torch.tensor(Geq_np, dtype=torch.float32,
-                           device=self.device)
-        return Geq, khi, zetax, zetay
+        dtype = rho.dtype
+        khi = _as_solver_tensor(khi, dtype, self.device)
+        zetax = _as_solver_tensor(zetax, dtype, self.device)
+        zetay = _as_solver_tensor(zetay, dtype, self.device)
+        return levermore_Geq_torch(
+            self.ex,
+            self.ey,
+            ux,
+            uy,
+            T,
+            rho,
+            self.Cv,
+            self.Qn,
+            khi,
+            zetax,
+            zetay,
+            device=self.device,
+        )
     
     def get_maxwellian_pressure_tensor(self, rho, ux, uy, T):
         momentumx = rho * ux
@@ -223,17 +227,18 @@ class SODSolver(nn.Module):
         return Fi, Gi
     
     def case_1_initial_conditions(self):
-        rho0 = torch.ones((self.Y, self.X), device=self.device)  # density
-        ux0 = torch.zeros((self.Y, self.X), device=self.device)  # fluid velocity in x
-        uy0 = torch.zeros((self.Y, self.X), device=self.device)  # fluid velocity in y
-        T0 = torch.ones((self.Y, self.X), device=self.device)  # temperature
+        dtype = self.ex.dtype
+        rho0 = torch.ones((self.Y, self.X), device=self.device, dtype=dtype)  # density
+        ux0 = torch.zeros((self.Y, self.X), device=self.device, dtype=dtype)  # fluid velocity in x
+        uy0 = torch.zeros((self.Y, self.X), device=self.device, dtype=dtype)  # fluid velocity in y
+        T0 = torch.ones((self.Y, self.X), device=self.device, dtype=dtype)  # temperature
         rho0[:, :self.Lx + 1] = 0.5
         rho0[:, self.Lx + 1:] = 2
         T0[:, :self.Lx + 1] = 0.2  # temperature
         T0[:, self.Lx + 1:] = 0.025  # temperature
-        khi0 = np.zeros((self.Y, self.X))  # Lagrange multipliers for g, this is for density
-        zetax0 = np.zeros((self.Y, self.X))  # Lagrange multipliers for g, this is for velocity in x
-        zetay0 = np.zeros((self.Y, self.X))  # Lagrange multipliers for g, this is for velocity in y
+        khi0 = torch.zeros((self.Y, self.X), device=self.device, dtype=dtype)
+        zetax0 = torch.zeros((self.Y, self.X), device=self.device, dtype=dtype)
+        zetay0 = torch.zeros((self.Y, self.X), device=self.device, dtype=dtype)
         Fi0 = self.get_Feq(rho0, ux0, uy0, T0)  # F_i population
         Gi0, khi, zetax, zetay = self.get_Geq_Newton_solver(rho0, ux0, uy0, T0, khi0, zetax0, zetay0) # G_i population                                     
         Fi0 =Fi0.to(self.device)
@@ -244,18 +249,19 @@ class SODSolver(nn.Module):
     def case_2_initial_conditions(self):
         rho_max = 1.0
         p_max = 0.2
-        ux0 = torch.zeros((self.Y, self.X), device=self.device)  # fluid velocity in x
-        uy0 = torch.zeros((self.Y, self.X), device=self.device)  # fluid velocity in y
-        rho0 = torch.ones((self.Y, self.X), device=self.device)  # density
+        dtype = self.ex.dtype
+        ux0 = torch.zeros((self.Y, self.X), device=self.device, dtype=dtype)  # fluid velocity in x
+        uy0 = torch.zeros((self.Y, self.X), device=self.device, dtype=dtype)  # fluid velocity in y
+        rho0 = torch.ones((self.Y, self.X), device=self.device, dtype=dtype)  # density
         rho0[:, :self.Lx+1] = 1 * rho_max
         rho0[:, self.Lx+1:] = 0.125 * rho_max
-        P0 = torch.zeros((self.Y, self.X), device=self.device)  # pressure
+        P0 = torch.zeros((self.Y, self.X), device=self.device, dtype=dtype)  # pressure
         P0[:, :self.Lx+1] = 1.0 * p_max
         P0[:, self.Lx+1:] = 0.1 * p_max
         T0 = P0/(rho0*self.R)
-        khi0 = np.zeros((self.Y, self.X))  
-        zetax0 = np.zeros((self.Y, self.X))  
-        zetay0 = np.zeros((self.Y, self.X))  
+        khi0 = torch.zeros((self.Y, self.X), device=self.device, dtype=dtype)
+        zetax0 = torch.zeros((self.Y, self.X), device=self.device, dtype=dtype)
+        zetay0 = torch.zeros((self.Y, self.X), device=self.device, dtype=dtype)
         Fi0 = self.get_Feq(rho0, ux0, uy0, T0)  # F_i population
         Gi0, khi, zetax, zetay = self.get_Geq_Newton_solver(rho0, ux0, uy0, T0, khi0, zetax0, zetay0) # G_i population
         Fi0 = Fi0.to(self.device)

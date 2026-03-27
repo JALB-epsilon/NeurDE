@@ -140,34 +140,32 @@ if __name__ == "__main__":
                 Fi0, Gi0 = cylinder_solver.collision(Fi0.squeeze(0), Gi0.squeeze(0), Feq, Geq_pred.permute(1, 0).reshape(9, cylinder_solver.Y, cylinder_solver.X), rho, ux, uy, T)
                 Fi, Gi = cylinder_solver.streaming(Fi0, Gi0)
                 if args.with_obs:
-                    with torch.no_grad():
-                        khi = detach(torch.zeros_like(ux))
-                        zetax = detach(torch.zeros_like(ux))
-                        zetay = detach(torch.zeros_like(ux))
+                    khi = torch.zeros_like(ux)
+                    zetax = torch.zeros_like(ux)
+                    zetay = torch.zeros_like(ux)
 
-                        Fi_obs_cyl, Gi_obs_cyl, Fi_obs_Inlet, Gi_obs_Inlet = cylinder_solver.get_obs_distribution(
-                                                                                                                rho,
-                                                                                                                ux, 
-                                                                                                                uy,
-                                                                                                                T,
-                                                                                                                khi,
-                                                                                                                zetax,
-                                                                                                                zetay)
+                    Fi_obs_cyl, Gi_obs_cyl, Fi_obs_Inlet, Gi_obs_Inlet = cylinder_solver.get_obs_distribution(
+                                                                                                            rho,
+                                                                                                            ux, 
+                                                                                                            uy,
+                                                                                                            T,
+                                                                                                            khi,
+                                                                                                            zetax,
+                                                                                                            zetay)
 
-                        Fi_new, Gi_new = cylinder_solver.enforce_Obs_and_BC(Fi,
-                                                                            Gi,
-                                                                            Fi_obs_cyl,
-                                                                            Gi_obs_cyl,
-                                                                            Fi_obs_Inlet,
-                                                                            Gi_obs_Inlet)
-                                                
+                    Fi_new, Gi_new = cylinder_solver.enforce_Obs_and_BC(Fi,
+                                                                        Gi,
+                                                                        Fi_obs_cyl,
+                                                                        Gi_obs_cyl,
+                                                                        Fi_obs_Inlet,
+                                                                        Gi_obs_Inlet)
 
-                    Fi0 = Fi_new.detach()
-                    Gi0 = Gi_new.detach()
+                    Fi0 = Fi_new
+                    Gi0 = Gi_new
 
                 else: 
-                    Fi0 = Fi.detach()
-                    Gi0 = Gi.detach()
+                    Fi0 = Fi
+                    Gi0 = Gi
                 
                 #plot the results of the Mach number 
                 Ma_NN = cylinder_solver.get_local_Mach(ux, uy, T)

@@ -1,5 +1,16 @@
 import numpy as np
+import torch
 from scipy import sparse
+
+
+def _multinv_torch(M):
+    """Batched matrix inverse used by the torch Levermore Newton solver."""
+    reg_val = 1e-12
+    m = M.shape[-1]
+    eye = torch.eye(m, dtype=M.dtype, device=M.device)
+    eye = eye.reshape((1,) * (M.dim() - 2) + (m, m)).expand(M.shape)
+    return torch.linalg.solve(M + reg_val * eye, eye)
+
 
 def multinv(M):
     sn = M.shape

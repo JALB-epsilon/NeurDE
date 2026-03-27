@@ -4,6 +4,13 @@ import numpy as np
 from src import *
 from utilities import detach, get_device
 
+
+def _as_solver_tensor(value, dtype, device):
+    if torch.is_tensor(value):
+        return value.to(device=device, dtype=dtype)
+    return torch.as_tensor(value, dtype=dtype, device=device)
+
+
 class Cylinder_base(nn.Module):
     def __init__(self,
                 X=500,
@@ -167,7 +174,7 @@ class Cylinder_base(nn.Module):
         alpha = torch.where(EPS < 0.01, torch.tensor(1.0, device=EPS.device), alpha)
         alpha = torch.where(EPS < 0.1, torch.tensor(self.alpha01, device=EPS.device), alpha)
         alpha = torch.where(EPS < 1, torch.tensor(self.alpha1, device=EPS.device), alpha)
-        alpha = torch.where(EPS >= 1, (1/tau_DL).clone().detach(), alpha)  
+        alpha = torch.where(EPS >= 1, 1 / tau_DL, alpha)  
         tau_EPS = alpha * tau_DL
         tau = tau_EPS.reshape(1, self.Y, self.X).expand(self.Qn, self.Y, self.X)
         tauT = 0.5 + (tau - 0.5) / self.Pr
@@ -188,73 +195,67 @@ class Cylinder_base(nn.Module):
         return Feq_BC
     
     def get_Geq_Newton_solver(self, rho, ux, uy, T, khi, zetax, zetay):
-        # Convert tensors to numpy arrays
-        rho_np = detach(rho) if not isinstance(rho, np.ndarray) else rho
-        ux_np = detach(ux) if not isinstance(ux, np.ndarray) else ux
-        uy_np = detach(uy) if not isinstance(uy, np.ndarray) else uy
-        T_np = detach(T) if not isinstance(T, np.ndarray) else T
-        khi = detach(khi) if not isinstance(khi, np.ndarray) else khi
-        zetax = detach(zetax) if not isinstance(zetax, np.ndarray) else zetax
-        zetay = detach(zetay) if not isinstance(zetay, np.ndarray) else zetay 
-        # Compute Geq, khi, zetax, zetay using levermore_Geq
-        Geq_np, khi, zetax, zetay = levermore_Geq(
-                                                detach(self.ex), 
-                                                detach(self.ey),
-                                                ux_np, uy_np,
-                                                 T_np, rho_np,
-                                                self.Cv, self.Qn,
-                                                khi, zetax, zetay
-                                            ) 
-        # Convert back to torch tensors
-        Geq = torch.tensor(Geq_np, dtype=torch.float32,  device=self.device)
-        return Geq, khi, zetax, zetay
+        dtype = rho.dtype
+        khi = _as_solver_tensor(khi, dtype, self.device)
+        zetax = _as_solver_tensor(zetax, dtype, self.device)
+        zetay = _as_solver_tensor(zetay, dtype, self.device)
+        return levermore_Geq_torch(
+            self.ex,
+            self.ey,
+            ux,
+            uy,
+            T,
+            rho,
+            self.Cv,
+            self.Qn,
+            khi,
+            zetax,
+            zetay,
+            device=self.device,
+        )
     
     def get_Geq_Newton_solver_obs(self, rho, ux, uy, T, khi, zetax, zetay):
-        # Convert tensors to numpy arrays
-        rho_np = detach(rho) if not isinstance(rho, np.ndarray) else rho
-        ux_np = detach(ux) if not isinstance(ux, np.ndarray) else ux
-        uy_np = detach(uy) if not isinstance(uy, np.ndarray) else uy
-        T_np = detach(T) if not isinstance(T, np.ndarray) else T
-        khi = detach(khi) if not isinstance(khi, np.ndarray) else khi
-        zetax = detach(zetax) if not isinstance(zetax, np.ndarray) else zetax
-        zetay = detach(zetay) if not isinstance(zetay, np.ndarray) else zetay 
-        # Compute Geq, khi, zetax, zetay using levermore_Geq
-        Geq_np, khi, zetax, zetay = levermore_Geq_Obs(
-                                                    detach(self.ex), 
-                                                    detach(self.ey),
-                                                    ux_np, uy_np,
-                                                    T_np, rho_np,
-                                                    self.Cv, self.Qn,
-                                                    khi, zetax, zetay, 
-                                                    detach(self.Obs)
-                                                    ) 
-        # Convert back to torch tensors
-        Geq_obs = torch.tensor(Geq_np,  dtype=torch.float32, 
-                               device=self.device)
-        return Geq_obs, khi, zetax, zetay
+        dtype = rho.dtype
+        khi = _as_solver_tensor(khi, dtype, self.device)
+        zetax = _as_solver_tensor(zetax, dtype, self.device)
+        zetay = _as_solver_tensor(zetay, dtype, self.device)
+        return levermore_Geq_Obs_torch(
+            self.ex,
+            self.ey,
+            ux,
+            uy,
+            T,
+            rho,
+            self.Cv,
+            self.Qn,
+            khi,
+            zetax,
+            zetay,
+            self.Obs,
+            device=self.device,
+        )
     
     def get_Geq_Newton_solver_BC(self, rho, ux, uy, T, khi, zetax, zetay):
-        # Convert tensors to numpy arrays
-        rho_np = detach(rho) if not isinstance(rho, np.ndarray) else rho
-        ux_np = detach(ux) if not isinstance(ux, np.ndarray) else ux
-        uy_np = detach(uy) if not isinstance(uy, np.ndarray) else uy
-        T_np = detach(T) if not isinstance(T, np.ndarray) else T
-        khi = detach(khi) if not isinstance(khi, np.ndarray) else khi
-        zetax = detach(zetax) if not isinstance(zetax, np.ndarray) else zetax
-        zetay = detach(zetay) if not isinstance(zetay, np.ndarray) else zetay 
-        # Compute Geq, khi, zetax, zetay using levermore_Geq
-        Geq_np, khi, zetax, zetay = levermore_Geq_BCs(
-                                                    detach(self.ex), 
-                                                    detach(self.ey),
-                                                    ux_np, uy_np,
-                                                    T_np, rho_np,
-                                                    self.Cv, self.Qn,
-                                                    khi, zetax, zetay, detach(self.coly), 0
-                                                    ) 
-        # Convert back to torch tensors
-        Geq_BC = torch.tensor(Geq_np, dtype=torch.float32, 
-                              device=self.device)
-        return Geq_BC, khi, zetax, zetay
+        dtype = rho.dtype
+        khi = _as_solver_tensor(khi, dtype, self.device)
+        zetax = _as_solver_tensor(zetax, dtype, self.device)
+        zetay = _as_solver_tensor(zetay, dtype, self.device)
+        return levermore_Geq_BCs_torch(
+            self.ex,
+            self.ey,
+            ux,
+            uy,
+            T,
+            rho,
+            self.Cv,
+            self.Qn,
+            khi,
+            zetax,
+            zetay,
+            self.coly,
+            torch.zeros_like(self.coly),
+            device=self.device,
+        )
 
 
     def get_obs_distribution(self, rho, ux, uy, T, khi, zetax, zetay):
@@ -369,14 +370,15 @@ class Cylinder_base(nn.Module):
     
     def initial_conditions(self):
         # Initial condition
-        rho = torch.ones((self.Y, self.X))
-        ux =  torch.full((self.Y, self.X), self.U0)
-        uy = torch.zeros((self.Y, self.X))
-        T = torch.full((self.Y, self.X), self.T0)
+        dtype = self.ex.dtype
+        rho = torch.ones((self.Y, self.X), device=self.device, dtype=dtype)
+        ux = torch.full((self.Y, self.X), self.U0, device=self.device, dtype=dtype)
+        uy = torch.zeros((self.Y, self.X), device=self.device, dtype=dtype)
+        T = torch.full((self.Y, self.X), self.T0, device=self.device, dtype=dtype)
 
-        khi0 = np.zeros((self.Y, self.X))
-        zetax0 = np.zeros((self.Y, self.X))
-        zetay0 = np.zeros((self.Y, self.X))
+        khi0 = torch.zeros((self.Y, self.X), device=self.device, dtype=dtype)
+        zetax0 = torch.zeros((self.Y, self.X), device=self.device, dtype=dtype)
+        zetay0 = torch.zeros((self.Y, self.X), device=self.device, dtype=dtype)
 
         Fi0 = self.get_Feq(rho, ux, uy, T)
  

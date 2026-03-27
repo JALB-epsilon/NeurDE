@@ -63,7 +63,8 @@ if __name__ == "__main__":
                                     number_of_rollout=number_of_rollout,
                                     )
 
-    dataloader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=4, pin_memory=True)  # batch size 1 to get each sequence.
+    stage2_batch_size = param_training["stage2"].get("batch_size", 1)
+    dataloader = DataLoader(dataset, batch_size=stage2_batch_size, shuffle=False, num_workers=4, pin_memory=True)
     val_dataset = Cylinder_stage2(F = all_F[args.num_samples:args.num_samples+100],
                                         G=all_G[args.num_samples:args.num_samples+100],
                                         Feq=all_Feq[args.num_samples:args.num_samples+100],
@@ -131,13 +132,6 @@ if __name__ == "__main__":
     epochs_since_last_save = [0] * 3
     last_epoch_loss = 0.0
 
-    # Get the first batch from the dataloader
-    #first_batch = next(iter(dataloader))
-    #Fi0, Gi0, Feq_seq, Geq_seq = first_batch
-    #Fi0 = Fi0[0, 0, ...].to(device)
-    #Gi0 = Gi0[0, 0, ...].to(device)
-
-
     for epoch in tqdm(range(epochs), desc="Epochs"):
         loss_epoch = 0
         for batch_idx, (F_seq, G_seq, Feq_seq, Geq_seq) in enumerate(dataloader):
@@ -145,27 +139,29 @@ if __name__ == "__main__":
 
             F_seq = F_seq.to(device)
             G_seq = G_seq.to(device)
-            Fi0 = F_seq[0, 0, ...]
-            Gi0 = G_seq[0, 0, ...]
             optimizer.zero_grad()
-            total_loss = 0 #in the rollout loop
-            for rollout in range(number_of_rollout):       
-                model.train()
-                rho, ux, uy, E = cylinder_solver.get_macroscopic(Fi0, Gi0)
-                T = cylinder_solver.get_temp_from_energy(ux, uy, E)
-                Feq = cylinder_solver.get_Feq(rho, ux, uy, T)
-                inputs = torch.stack([rho.unsqueeze(0), ux.unsqueeze(0), uy.unsqueeze(0), T.unsqueeze(0)], dim=1).to(device)
-                Geq_pred = model(inputs, basis)
-                Geq_target = Geq_seq[0, rollout].to(device)
-                inner_loss = loss_func(Geq_pred, Geq_target.permute(1, 2, 0).reshape(-1, 9))
-                total_loss += inner_loss
-                Fi0, Gi0 = cylinder_solver.collision(Fi0, Gi0, Feq, Geq_pred.permute(1, 0).reshape(cylinder_solver.Qn, cylinder_solver.Y, cylinder_solver.X), rho, ux, uy, T)
-                Fi, Gi = cylinder_solver.streaming(Fi0, Gi0)
-                #print("loss", inner_loss.item())
-                with torch.no_grad():
-                    khi = torch.zeros_like(ux).cpu().numpy()
-                    zetax = torch.zeros_like(ux).cpu().numpy()
-                    zetay = torch.zeros_like(ux).cpu().numpy()
+            total_loss = torch.zeros((), device=device)
+            batch_size = F_seq.shape[0]
+            for sample_idx in range(batch_size):
+                Fi0 = F_seq[sample_idx, 0, ...]
+                Gi0 = G_seq[sample_idx, 0, ...]
+                sample_loss = torch.zeros((), device=device)
+                for rollout in range(number_of_rollout):
+                    model.train()
+                    rho, ux, uy, E = cylinder_solver.get_macroscopic(Fi0, Gi0)
+                    T = cylinder_solver.get_temp_from_energy(ux, uy, E)
+                    Feq = cylinder_solver.get_Feq(rho, ux, uy, T)
+                    inputs = torch.stack([rho.unsqueeze(0), ux.unsqueeze(0), uy.unsqueeze(0), T.unsqueeze(0)], dim=1).to(device)
+                    Geq_pred = model(inputs, basis)
+                    Geq_target = Geq_seq[sample_idx, rollout].to(device)
+                    inner_loss = loss_func(Geq_pred, Geq_target.permute(1, 2, 0).reshape(-1, 9))
+                    sample_loss = sample_loss + inner_loss
+                    Fi0, Gi0 = cylinder_solver.collision(Fi0, Gi0, Feq, Geq_pred.permute(1, 0).reshape(cylinder_solver.Qn, cylinder_solver.Y, cylinder_solver.X), rho, ux, uy, T)
+                    Fi, Gi = cylinder_solver.streaming(Fi0, Gi0)
+
+                    khi = torch.zeros_like(ux)
+                    zetax = torch.zeros_like(ux)
+                    zetay = torch.zeros_like(ux)
 
                     Fi_obs_cyl, Gi_obs_cyl, Fi_obs_Inlet, Gi_obs_Inlet = cylinder_solver.get_obs_distribution(
                                                                                         rho,
@@ -173,7 +169,7 @@ if __name__ == "__main__":
                                                                                         uy,
                                                                                         T,
                                                                                         khi,
-                                                                                         zetax,
+                                                                                        zetax,
                                                                                         zetay)
 
                     Fi_new, Gi_new = cylinder_solver.enforce_Obs_and_BC(
@@ -183,16 +179,16 @@ if __name__ == "__main__":
                                                 Gi_obs_cyl,
                                                 Fi_obs_Inlet,
                                                 Gi_obs_Inlet)
-                    
-   
-                 
-                Fi0 = Fi.clone()#Fi_new.clone()
-                Gi0 =Gi.clone() #Gi_new.clone()
+
+                    Fi0 = Fi_new
+                    Gi0 = Gi_new
+                total_loss = total_loss + sample_loss / float(number_of_rollout)
+            total_loss = total_loss / float(batch_size)
             total_loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
             loss_epoch += total_loss.item()
-            print(f"Epoch: {epoch}, Batch ID: {batch_idx}, Loss: {total_loss.item()/number_of_rollout:.6f}")
+            print(f"Epoch: {epoch}, Batch ID: {batch_idx}, Loss: {total_loss.item():.6f}")
         current_loss = loss_epoch / len(dataloader)
         scheduler.step()
 
