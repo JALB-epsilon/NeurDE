@@ -4,7 +4,6 @@ from architectures import NeurDE, bounded_residual_population, project_conserved
 from utilities import *
 import argparse
 import yaml
-from tqdm import tqdm
 import os
 import time
 import h5py
@@ -13,6 +12,14 @@ from torch.utils.data import DataLoader
 from train_stage_1 import create_basis
 from SOD_solver import SODSolver
 import torch.nn as nn
+import torch.nn.functional as F
+
+try:
+    from tqdm import tqdm
+except ModuleNotFoundError:
+    def tqdm(iterable, **kwargs):
+        del kwargs
+        return iterable
 
 
 def build_effective_feq(
@@ -280,15 +287,180 @@ def run_long_rollout_validation(
     }
 
 
-def calculate_macro_rollout_loss(loss_func, rho_pred, ux_pred, T_pred, rho_target, ux_target, T_target):
-    P_pred = rho_pred * T_pred
-    P_target = rho_target * T_target
-    return 0.25 * (
-        loss_func(rho_pred, rho_target)
-        + loss_func(ux_pred, ux_target)
-        + loss_func(T_pred, T_target)
-        + loss_func(P_pred, P_target)
+def apply_loss_metric(prediction, target, metric="relative_error", huber_delta=0.01):
+    metric_name = str(metric).lower()
+    if metric_name == "relative_error":
+        return calculate_relative_error(prediction, target)
+    if metric_name == "l1":
+        return F.l1_loss(prediction, target)
+    if metric_name == "mse":
+        return F.mse_loss(prediction, target)
+    if metric_name == "huber":
+        return F.huber_loss(prediction, target, delta=float(huber_delta))
+    raise ValueError(f"Unsupported SOD shock-loss metric: {metric}")
+
+
+def edge_weighted_gradient_loss(prediction, target, dx, metric, huber_delta, edge_alpha, eps=1.0e-7):
+    pred_gradient = (prediction[..., 1:] - prediction[..., :-1]) / max(float(dx), eps)
+    target_gradient = (target[..., 1:] - target[..., :-1]) / max(float(dx), eps)
+    if float(edge_alpha) > 0.0:
+        gradient_scale = target_gradient.abs().mean(dim=-1, keepdim=True).clamp_min(eps)
+        weights = 1.0 + float(edge_alpha) * target_gradient.abs() / gradient_scale
+        pred_gradient = weights * pred_gradient
+        target_gradient = weights * target_gradient
+    return apply_loss_metric(pred_gradient, target_gradient, metric=metric, huber_delta=huber_delta)
+
+
+def cumulative_integral_loss(prediction, target, dx, metric, huber_delta):
+    pred_integral = torch.cumsum(prediction, dim=-1) * float(dx)
+    target_integral = torch.cumsum(target, dim=-1) * float(dx)
+    return apply_loss_metric(pred_integral, target_integral, metric=metric, huber_delta=huber_delta)
+
+
+def average_loss_terms(terms, device, dtype):
+    if not terms:
+        return torch.zeros((), device=device, dtype=dtype)
+    return sum(terms) / float(len(terms))
+
+
+def get_sod_conservative_fields(rho, ux, uy, T, cv):
+    momentum_x = rho * ux
+    momentum_y = rho * uy
+    total_energy = rho * (cv * T + 0.5 * (ux.square() + uy.square()))
+    pressure = rho * T
+    return momentum_x, momentum_y, total_energy, pressure
+
+
+def calculate_macro_rollout_loss(
+    loss_func,
+    rho_pred,
+    ux_pred,
+    T_pred,
+    rho_target,
+    ux_target,
+    T_target,
+    uy_pred=None,
+    uy_target=None,
+    cv=1.0,
+    dx=1.0,
+    shock_loss_config=None,
+):
+    if not shock_loss_config:
+        P_pred = rho_pred * T_pred
+        P_target = rho_target * T_target
+        return 0.25 * (
+            loss_func(rho_pred, rho_target)
+            + loss_func(ux_pred, ux_target)
+            + loss_func(T_pred, T_target)
+            + loss_func(P_pred, P_target)
+        )
+
+    if uy_pred is None:
+        uy_pred = torch.zeros_like(ux_pred)
+    if uy_target is None:
+        uy_target = torch.zeros_like(ux_target)
+
+    metric = shock_loss_config.get("metric", "huber")
+    huber_delta = float(shock_loss_config.get("huber_delta", 0.01))
+    conservative_weight = float(shock_loss_config.get("conservative_weight", 1.0))
+    primitive_weight = float(shock_loss_config.get("primitive_weight", 0.0))
+    integral_weight = float(shock_loss_config.get("integral_weight", 0.0))
+    density_gradient_weight = float(shock_loss_config.get("density_gradient_weight", 0.0))
+    pressure_gradient_weight = float(shock_loss_config.get("pressure_gradient_weight", 0.0))
+    edge_alpha = float(shock_loss_config.get("edge_alpha", 0.0))
+    conservation_weight = float(shock_loss_config.get("conservation_weight", 0.0))
+    positivity_weight = float(shock_loss_config.get("positivity_weight", 0.0))
+    density_floor = float(shock_loss_config.get("density_floor", 1.0e-6))
+    temperature_floor = float(shock_loss_config.get("temperature_floor", 1.0e-6))
+    pressure_floor = float(shock_loss_config.get("pressure_floor", 1.0e-6))
+
+    momentum_x_pred, momentum_y_pred, energy_pred, pressure_pred = get_sod_conservative_fields(
+        rho_pred,
+        ux_pred,
+        uy_pred,
+        T_pred,
+        cv=cv,
     )
+    momentum_x_target, momentum_y_target, energy_target, pressure_target = get_sod_conservative_fields(
+        rho_target,
+        ux_target,
+        uy_target,
+        T_target,
+        cv=cv,
+    )
+
+    loss = torch.zeros((), device=rho_pred.device, dtype=rho_pred.dtype)
+
+    if conservative_weight > 0.0:
+        conservative_terms = [
+            apply_loss_metric(rho_pred, rho_target, metric=metric, huber_delta=huber_delta),
+            apply_loss_metric(momentum_x_pred, momentum_x_target, metric=metric, huber_delta=huber_delta),
+            apply_loss_metric(momentum_y_pred, momentum_y_target, metric=metric, huber_delta=huber_delta),
+            apply_loss_metric(energy_pred, energy_target, metric=metric, huber_delta=huber_delta),
+        ]
+        loss = loss + conservative_weight * average_loss_terms(conservative_terms, rho_pred.device, rho_pred.dtype)
+
+    if primitive_weight > 0.0:
+        primitive_terms = [
+            apply_loss_metric(rho_pred, rho_target, metric=metric, huber_delta=huber_delta),
+            apply_loss_metric(ux_pred, ux_target, metric=metric, huber_delta=huber_delta),
+            apply_loss_metric(uy_pred, uy_target, metric=metric, huber_delta=huber_delta),
+            apply_loss_metric(T_pred, T_target, metric=metric, huber_delta=huber_delta),
+            apply_loss_metric(pressure_pred, pressure_target, metric=metric, huber_delta=huber_delta),
+        ]
+        loss = loss + primitive_weight * average_loss_terms(primitive_terms, rho_pred.device, rho_pred.dtype)
+
+    if integral_weight > 0.0:
+        integral_terms = [
+            cumulative_integral_loss(rho_pred, rho_target, dx=dx, metric=metric, huber_delta=huber_delta),
+            cumulative_integral_loss(momentum_x_pred, momentum_x_target, dx=dx, metric=metric, huber_delta=huber_delta),
+            cumulative_integral_loss(momentum_y_pred, momentum_y_target, dx=dx, metric=metric, huber_delta=huber_delta),
+            cumulative_integral_loss(energy_pred, energy_target, dx=dx, metric=metric, huber_delta=huber_delta),
+        ]
+        loss = loss + integral_weight * average_loss_terms(integral_terms, rho_pred.device, rho_pred.dtype)
+
+    if density_gradient_weight > 0.0:
+        loss = loss + density_gradient_weight * edge_weighted_gradient_loss(
+            rho_pred,
+            rho_target,
+            dx=dx,
+            metric=metric,
+            huber_delta=huber_delta,
+            edge_alpha=edge_alpha,
+        )
+
+    if pressure_gradient_weight > 0.0:
+        loss = loss + pressure_gradient_weight * edge_weighted_gradient_loss(
+            pressure_pred,
+            pressure_target,
+            dx=dx,
+            metric=metric,
+            huber_delta=huber_delta,
+            edge_alpha=edge_alpha,
+        )
+
+    if conservation_weight > 0.0:
+        conservative_mean_terms = [
+            apply_loss_metric(rho_pred.mean(dim=(-2, -1)), rho_target.mean(dim=(-2, -1)), metric=metric, huber_delta=huber_delta),
+            apply_loss_metric(momentum_x_pred.mean(dim=(-2, -1)), momentum_x_target.mean(dim=(-2, -1)), metric=metric, huber_delta=huber_delta),
+            apply_loss_metric(momentum_y_pred.mean(dim=(-2, -1)), momentum_y_target.mean(dim=(-2, -1)), metric=metric, huber_delta=huber_delta),
+            apply_loss_metric(energy_pred.mean(dim=(-2, -1)), energy_target.mean(dim=(-2, -1)), metric=metric, huber_delta=huber_delta),
+        ]
+        loss = loss + conservation_weight * average_loss_terms(
+            conservative_mean_terms,
+            rho_pred.device,
+            rho_pred.dtype,
+        )
+
+    if positivity_weight > 0.0:
+        positivity_penalty = (
+            torch.relu(density_floor - rho_pred).square().mean()
+            + torch.relu(temperature_floor - T_pred).square().mean()
+            + torch.relu(pressure_floor - pressure_pred).square().mean()
+        )
+        loss = loss + positivity_weight * positivity_penalty
+
+    return loss
 
 
 def resolve_rollout_warmup_count(max_rollout, start_rollout, warmup_batches, global_batch_step):
@@ -396,6 +568,8 @@ def compute_stage2_rollout_loss(
     detach_interval=0,
     loss_stride=1,
     backward_chunk_size=0,
+    shock_loss_config=None,
+    dx=1.0,
 ):
     Fi0 = F_seq[:, 0, ...]
     Gi0 = G_seq[:, 0, ...]
@@ -460,6 +634,11 @@ def compute_stage2_rollout_loss(
                     rho_target=target_rho_seq[:, rollout],
                     ux_target=target_ux_seq[:, rollout],
                     T_target=target_T_seq[:, rollout],
+                    uy_pred=uy,
+                    uy_target=target_uy_seq[:, rollout],
+                    cv=cv,
+                    dx=dx,
+                    shock_loss_config=shock_loss_config,
                 )
             else:
                 inner_loss = torch.zeros((), device=Fi0.device, dtype=Fi0.dtype)
@@ -497,6 +676,11 @@ def compute_stage2_rollout_loss(
                         rho_target=target_rho_seq[:, rollout + 1],
                         ux_target=target_ux_seq[:, rollout + 1],
                         T_target=target_T_seq[:, rollout + 1],
+                        uy_pred=uy_next,
+                        uy_target=target_uy_seq[:, rollout + 1],
+                        cv=cv,
+                        dx=dx,
+                        shock_loss_config=shock_loss_config,
                     )
                 else:
                     inner_loss = torch.zeros((), device=Fi0.device, dtype=Fi0.dtype)
@@ -671,6 +855,7 @@ if __name__ == "__main__":
     detach_interval = args.detach_interval if args.detach_interval is not None else param_training["stage2"].get("detach_interval", 0)
     loss_stride = param_training["stage2"].get("loss_stride", 1)
     loss_stride_schedule = param_training["stage2"].get("loss_stride_schedule", None)
+    shock_loss_config = param_training["stage2"].get("shock_loss", None)
     logit_clip = param_training.get("logit_clip", 15.0)
     project_feq_moments = param_training.get("project_feq_moments", False)
     enforce_sod_symmetry = param_training.get("enforce_sod_symmetry", False)
@@ -725,6 +910,10 @@ if __name__ == "__main__":
         f"grad_clip={grad_clip_norm}, detach_interval={detach_interval}, "
         f"loss_stride={loss_stride}, tvd_weight={tvd_weight}, curvature_weight={curvature_weight}"
     )
+    if shock_loss_config:
+        print(f"Shock-aware loss config: {shock_loss_config}")
+    else:
+        print("Shock-aware loss config: disabled")
 
     if args.save_model:
         os.makedirs(param_training["stage2"]["model_dir"], exist_ok=True)
@@ -867,6 +1056,7 @@ if __name__ == "__main__":
     
     Uax, Uay = case_params["Uax"], case_params["Uay"]
     basis = create_basis(Uax, Uay, device)
+    dx = 1.0 / max(int(sod_solver.X) - 1, 1)
 
     loss_func = calculate_relative_error
 
@@ -989,6 +1179,8 @@ if __name__ == "__main__":
                 detach_interval=detach_interval,
                 loss_stride=current_loss_stride,
                 backward_chunk_size=detach_interval if chunked_backward else 0,
+                shock_loss_config=shock_loss_config,
+                dx=dx,
             )
             if skip_nonfinite_batches and not torch.isfinite(total_loss):
                 print(
@@ -1076,6 +1268,8 @@ if __name__ == "__main__":
                     geq_collision_mix=validation_geq_collision_mix,
                     detach_interval=detach_interval,
                     loss_stride=validation_loss_stride,
+                    shock_loss_config=shock_loss_config,
+                    dx=dx,
                 ).item()
             val_loss /= max(len(val_dataloader), 1)
             validation_supervised_steps = count_supervised_steps(validation_rollout, validation_loss_stride)

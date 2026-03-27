@@ -43,7 +43,7 @@ def project_conserved_moments(flat_population, flat_macro_state, basis, nullspac
     return target_row_component + gamma * nullspace_component
 
 
-def project_energy_moments(flat_population, flat_macro_state, basis, cv, nullspace_gamma=1.0):
+def project_energy_moments(flat_population, flat_macro_state, basis, cv, nullspace_gamma=1.0, positivity_eps=1.0e-8):
     del basis
     ones = torch.ones((1, flat_population.shape[-1]), device=flat_population.device, dtype=flat_population.dtype)
     gram = ones @ ones.transpose(0, 1)
@@ -63,7 +63,13 @@ def project_energy_moments(flat_population, flat_macro_state, basis, cv, nullspa
     target_row_component = target_row_coeffs @ ones
     nullspace_component = flat_population - raw_row_component
     gamma = _resolve_nullspace_gamma(nullspace_gamma, flat_population)
-    return target_row_component + gamma * nullspace_component
+    projected = target_row_component + gamma * nullspace_component
+    if positivity_eps is not None:
+        eps = torch.tensor(float(positivity_eps), device=projected.device, dtype=projected.dtype)
+        projected = projected.clamp_min(eps)
+        projected_sum = projected.sum(dim=-1, keepdim=True).clamp_min(eps)
+        projected = projected * (target_moments / projected_sum)
+    return projected
 
 
 def bounded_residual_population(base_population, predicted_population, residual_scale, eps=1.0e-12):

@@ -29,6 +29,15 @@ def resolve_module_path(path):
     return os.path.join(MODULE_DIR, path)
 
 
+def resolve_stabilizer_kwargs(config):
+    return {
+        "macro_limiter": config.get("macro_limiter", "none"),
+        "macro_range_min": config.get("macro_range_min"),
+        "macro_range_max": config.get("macro_range_max"),
+        "macro_target_mean": config.get("macro_target_mean"),
+    }
+
+
 def exact_burgers_riemann(x, t, u_left, u_right, x0):
     if t <= 0:
         return np.where(x <= x0, u_left, u_right)
@@ -77,6 +86,10 @@ class BurgersSolver(nn.Module):
         boundary="outflow",
         u_left_bc=None,
         u_right_bc=None,
+        macro_limiter="none",
+        macro_range_min=None,
+        macro_range_max=None,
+        macro_target_mean=None,
     ):
         super().__init__()
         self.X = X
@@ -94,6 +107,10 @@ class BurgersSolver(nn.Module):
         self.boundary = boundary.lower()
         self.u_left_bc = u_left_bc
         self.u_right_bc = u_right_bc
+        self.macro_limiter = str(macro_limiter).lower()
+        self.macro_range_min = None if macro_range_min is None else float(macro_range_min)
+        self.macro_range_max = None if macro_range_max is None else float(macro_range_max)
+        self.macro_target_mean = None if macro_target_mean is None else float(macro_target_mean)
         self.dx = self.domain_length / max(self.X - 1, 1)
         self.dt = self.dx / self.lam
         self.directions, self.weights = self._build_lattice(self.lattice, device)
@@ -191,6 +208,7 @@ class BurgersSolver(nn.Module):
         return equilibrium
 
     def equilibrium(self, u):
+        u = self.stabilize_macro(u)
         if self.lattice == "D1Q3":
             return self.equilibrium_d1q3(u)
         if self.lattice == "D2Q9":
@@ -309,7 +327,72 @@ class BurgersSolver(nn.Module):
         if Feq is None:
             Feq = self.equilibrium(u)
         F_next = self.streaming(self.collision(F, Feq))
+        F_next = self.stabilize_population(F_next)
         return F_next, u, Feq
+
+    def _project_macro_box_preserve_mean(self, u):
+        lower = self.macro_range_min if self.macro_range_min is not None else None
+        upper = self.macro_range_max if self.macro_range_max is not None else None
+        if self.macro_limiter == "none":
+            return u
+
+        replacement = self.macro_target_mean if self.macro_target_mean is not None else 0.0
+        if lower is not None:
+            replacement = max(replacement, lower)
+        if upper is not None:
+            replacement = min(replacement, upper)
+        limited = torch.nan_to_num(u, nan=replacement, posinf=replacement, neginf=replacement)
+
+        if self.macro_limiter == "clamp":
+            if lower is not None or upper is not None:
+                min_value = lower if lower is not None else -torch.inf
+                max_value = upper if upper is not None else torch.inf
+                limited = limited.clamp(min=min_value, max=max_value)
+            return limited
+
+        if self.macro_limiter != "conservative_clamp":
+            raise ValueError(f"Unsupported macro_limiter: {self.macro_limiter}")
+
+        if lower is None or upper is None:
+            raise ValueError("conservative_clamp requires both macro_range_min and macro_range_max.")
+
+        target_mean = self.macro_target_mean if self.macro_target_mean is not None else float(limited.mean())
+        lower_bound = lower - float(torch.max(limited))
+        upper_bound = upper - float(torch.min(limited))
+        for _ in range(64):
+            offset = 0.5 * (lower_bound + upper_bound)
+            candidate = torch.clamp(limited + offset, min=lower, max=upper)
+            if float(candidate.mean()) < target_mean:
+                lower_bound = offset
+            else:
+                upper_bound = offset
+        return torch.clamp(limited + 0.5 * (lower_bound + upper_bound), min=lower, max=upper)
+
+    def stabilize_macro(self, u):
+        if self.macro_limiter == "none":
+            return u
+
+        has_bad_macro = not torch.isfinite(u).all()
+        if self.macro_range_min is not None:
+            has_bad_macro = has_bad_macro or bool((u < self.macro_range_min).any())
+        if self.macro_range_max is not None:
+            has_bad_macro = has_bad_macro or bool((u > self.macro_range_max).any())
+        if not has_bad_macro:
+            return u
+        return self._project_macro_box_preserve_mean(u)
+
+    def stabilize_population(self, F):
+        if self.macro_limiter == "none":
+            return F
+
+        u = self.macro(F)
+        limited_u = self.stabilize_macro(u)
+        has_bad_population = not torch.isfinite(F).all()
+        has_bad_macro = not torch.equal(limited_u, u)
+        if not has_bad_population and not has_bad_macro:
+            return F
+
+        return self.equilibrium(limited_u)
 
 
 def main():
@@ -341,29 +424,62 @@ def main():
         boundary=config.get("boundary", "outflow"),
         u_left_bc=config.get("u_left"),
         u_right_bc=config.get("u_right"),
+        **resolve_stabilizer_kwargs(config),
     )
 
     x = solver.x_grid()
-    x0 = solver.physical_x0(config["x0"])
     all_u = []
     all_Feq = []
-    for step in range(args.steps):
-        u = exact_burgers_riemann(x, step * solver.dt, config["u_left"], config["u_right"], x0)
-        all_u.append(u.astype(np.float32))
-        feq = solver.equilibrium(torch.tensor(u, dtype=torch.float32, device=solver.device))
-        all_Feq.append(feq.cpu().numpy().astype(np.float32))
+    initial_condition = str(config.get("initial_condition", "riemann")).lower()
+    shock_time = None
+
+    if initial_condition == "sinusoidal":
+        u0 = burgers_sinusoidal_initial(
+            x,
+            mean=config.get("sine_mean", 0.6),
+            amplitude=config.get("sine_amplitude", 0.4),
+            wavenumber=config.get("sine_wavenumber", 1.0),
+            phase=config.get("sine_phase", 0.0),
+            domain_length=config.get("domain_length", 1.0),
+        )
+        shock_time = burgers_sinusoidal_shock_time(
+            amplitude=config.get("sine_amplitude", 0.4),
+            wavenumber=config.get("sine_wavenumber", 1.0),
+            domain_length=config.get("domain_length", 1.0),
+        )
+        F = solver.equilibrium(torch.tensor(u0, dtype=torch.float32, device=solver.device))
+        for step in range(args.steps):
+            u = solver.macro(F).detach().cpu().numpy().astype(np.float32)
+            feq = solver.equilibrium(torch.tensor(u, dtype=torch.float32, device=solver.device))
+            all_u.append(u)
+            all_Feq.append(feq.detach().cpu().numpy().astype(np.float32))
+            if step < args.steps - 1:
+                F, _, _ = solver.step(F, feq)
+    else:
+        x0 = solver.physical_x0(config["x0"])
+        for step in range(args.steps):
+            u = exact_burgers_riemann(x, step * solver.dt, config["u_left"], config["u_right"], x0)
+            all_u.append(u.astype(np.float32))
+            feq = solver.equilibrium(torch.tensor(u, dtype=torch.float32, device=solver.device))
+            all_Feq.append(feq.cpu().numpy().astype(np.float32))
 
     with h5py.File(data_path, "w") as handle:
         handle.create_dataset("u", data=np.stack(all_u))
         handle.create_dataset("Feq", data=np.stack(all_Feq))
         handle.attrs["lattice"] = solver.lattice
         handle.attrs["equilibrium_mode"] = solver.equilibrium_mode
+        handle.attrs["initial_condition"] = initial_condition
         handle.attrs["Qn"] = solver.Qn
         handle.attrs["dt"] = solver.dt
         handle.attrs["dx"] = solver.dx
         handle.create_dataset("velocities", data=solver.velocities.cpu().numpy())
+        handle.create_dataset("x", data=x.astype(np.float32))
+        if shock_time is not None and np.isfinite(shock_time):
+            handle.attrs["estimated_shock_time"] = float(shock_time)
 
     print(f"Saved Burgers dataset to {data_path}")
+    if shock_time is not None and np.isfinite(shock_time):
+        print(f"Estimated sinusoidal shock time: {shock_time:.6f} (step ~ {shock_time / solver.dt:.1f})")
 
 
 if __name__ == "__main__":

@@ -3,7 +3,6 @@ from architectures import NeurDE, bounded_residual_population, project_conserved
 from utilities import *
 import argparse
 import yaml
-from tqdm import tqdm
 import os
 import h5py
 from train_stage_1 import create_basis
@@ -11,6 +10,13 @@ from SOD_solver import SODSolver
 from analytic_sod import analytic_reference_from_case
 import numpy as np
 import matplotlib.pyplot as plt
+
+try:
+    from tqdm import tqdm
+except ModuleNotFoundError:
+    def tqdm(iterable, **kwargs):
+        del kwargs
+        return iterable
 
 
 def build_effective_feq(

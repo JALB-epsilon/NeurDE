@@ -3,9 +3,15 @@ from architectures import NeurDE
 from utilities import *
 import argparse
 import yaml
-from tqdm import tqdm
 import os
 from torch.utils.data import DataLoader
+
+try:
+    from tqdm import tqdm
+except ModuleNotFoundError:
+    def tqdm(iterable, **kwargs):
+        del kwargs
+        return iterable
 
 def create_basis(Uax, Uay, device):
     # Keep the basis identical to the solver's shifted lattice velocities.

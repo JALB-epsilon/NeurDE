@@ -1,0 +1,113 @@
+2:
+  hidden_dim: 64
+  num_layers: 4
+  logit_clip: 15.0
+  project_feq_moments: true
+  enforce_sod_symmetry: false
+  feq_nullspace_gamma_mode: fixed
+  feq_nullspace_gamma: 1.0
+  geq_mode: conservative
+  geq_nullspace_gamma_mode: fixed
+  geq_nullspace_gamma: 1.0
+  learn_feq: false
+  data_dir: data_base/SOD_case2.h5
+  stage1:
+    learn_feq: false
+    geq_mode: conservative
+    feq_nullspace_gamma_mode: fixed
+    feq_nullspace_gamma: 1.0
+    geq_nullspace_gamma_mode: fixed
+    geq_nullspace_gamma: 1.0
+    epochs: 3000
+    lr: 0.0001
+    geq_moment_weight: 0.1
+    model_dir: results_todo/case2/geq_conservative_feq_analytic_shock_aware/stage1
+    scheduler: CosineAnnealingWarmRestarts
+    scheduler_config:
+      CosineAnnealingWarmRestarts:
+        T_0: 1500
+        T_mult: 2
+        eta_min: 0.000005
+  stage2:
+    learn_feq: false
+    geq_mode: conservative
+    feq_nullspace_gamma_mode: fixed
+    feq_nullspace_gamma: 1.0
+    geq_nullspace_gamma_mode: fixed
+    geq_nullspace_gamma: 1.0
+    epochs: 1000
+    lr: 1.0e-5
+    model_dir: results_todo/case2/geq_conservative_feq_analytic_shock_aware/stage2
+    N: 100
+    batch_size: 4
+    rollout_start: 1
+    rollout_warmup_batches: 0
+    rollout_schedule:
+      - rollout: 1
+        batches: 500
+      - rollout: 2
+        batches: 500
+      - rollout: 4
+        batches: 1000
+      - rollout: 8
+        batches: 2000
+      - rollout: 16
+        batches: 6000
+      - rollout: 25
+        batches: 4000
+      - rollout: 50
+        batches: 3000
+      - rollout: 100
+        batches: 0
+    detach_interval: 16
+    loss_stride: 1
+    loss_stride_schedule:
+      - stride: 1
+        batches: 14000
+      - stride: 2
+        batches: 3000
+      - stride: 4
+        batches: 0
+    feq_collision_mix_start: 1.0
+    feq_collision_mix_warmup_batches: 0
+    feq_collision_mix_eval: 1.0
+    geq_collision_mix_start: 1.0
+    geq_collision_mix_warmup_batches: 0
+    equilibrium_anchor_weight: 0.0
+    geq_moment_weight: 0.1
+    grad_clip_norm: 0.5
+    skip_nonfinite_batches: true
+    TVD: true
+    tvd_weight: 10.0
+    curvature_weight: 4.0
+    shock_loss:
+      metric: huber
+      huber_delta: 0.01
+      conservative_weight: 1.0
+      primitive_weight: 0.15
+      integral_weight: 0.25
+      density_gradient_weight: 0.05
+      pressure_gradient_weight: 0.05
+      edge_alpha: 2.0
+      conservation_weight: 0.1
+      positivity_weight: 0.2
+      density_floor: 1.0e-4
+      temperature_floor: 1.0e-4
+      pressure_floor: 1.0e-4
+    rollout_source: predicted
+    loss_target: analytic_macro
+    plot_frequency: 25
+    benchmark_steps: 100
+    long_rollout_eval: true
+    long_rollout_eval_frequency: 5
+    long_rollout_eval_min_rollout: 16
+    long_rollout_eval_start: 500
+    long_rollout_eval_steps: 500
+    long_rollout_save_top_k: 3
+    scheduler: OneCycleLR
+    scheduler_config:
+      OneCycleLR:
+        max_lr: 1.0e-4
+        pct_start: 0.3
+        div_factor: 10
+        final_div_factor: 100

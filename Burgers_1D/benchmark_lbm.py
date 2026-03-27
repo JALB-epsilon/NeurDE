@@ -15,6 +15,7 @@ from burgers_solver import (
     exact_burgers_riemann,
     resolve_config_path,
     resolve_module_path,
+    resolve_stabilizer_kwargs,
 )
 
 
@@ -64,6 +65,7 @@ def main():
         boundary=config.get("boundary", "outflow"),
         u_left_bc=config.get("u_left"),
         u_right_bc=config.get("u_right"),
+        **resolve_stabilizer_kwargs(config),
     )
 
     steps = args.steps

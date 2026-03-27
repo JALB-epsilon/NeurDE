@@ -4,10 +4,11 @@ import random
 
 import h5py
 import torch
+import torch.nn.functional as F
 import yaml
 
 from architectures import NeurDE
-from burgers_solver import BurgersSolver, default_config_path, resolve_config_path, resolve_module_path
+from burgers_solver import BurgersSolver, default_config_path, resolve_config_path, resolve_module_path, resolve_stabilizer_kwargs
 
 
 def reshape_prediction(prediction, x_points, qn):
@@ -16,6 +17,112 @@ def reshape_prediction(prediction, x_points, qn):
 
 def relative_error(prediction, target, eps=1.0e-7):
     return torch.norm(prediction - target) / (torch.norm(target) + eps)
+
+
+def local_variation_increase_penalty(u_new, u_old):
+    if u_new.shape != u_old.shape:
+        raise ValueError("u_new and u_old must have the same shape.")
+    diff_new = u_new[..., 1:] - u_new[..., :-1]
+    diff_old = u_old[..., 1:] - u_old[..., :-1]
+    variation_growth = torch.relu(torch.abs(diff_new) - torch.abs(diff_old))
+    return variation_growth.square().mean()
+
+
+def local_curvature_increase_penalty(u_new, u_old):
+    if u_new.shape != u_old.shape:
+        raise ValueError("u_new and u_old must have the same shape.")
+    if u_new.shape[-1] < 3:
+        return torch.zeros((), device=u_new.device, dtype=u_new.dtype)
+    diff_new = u_new[..., 1:] - u_new[..., :-1]
+    diff_old = u_old[..., 1:] - u_old[..., :-1]
+    curv_new = diff_new[..., 1:] - diff_new[..., :-1]
+    curv_old = diff_old[..., 1:] - diff_old[..., :-1]
+    curvature_growth = torch.relu(torch.abs(curv_new) - torch.abs(curv_old))
+    return curvature_growth.square().mean()
+
+
+def apply_loss_metric(prediction, target, metric="relative_error", huber_delta=0.01):
+    metric_name = str(metric).lower()
+    if metric_name == "relative_error":
+        return relative_error(prediction, target)
+    if metric_name == "l1":
+        return F.l1_loss(prediction, target)
+    if metric_name == "mse":
+        return F.mse_loss(prediction, target)
+    if metric_name == "huber":
+        return F.huber_loss(prediction, target, delta=float(huber_delta))
+    raise ValueError(f"Unsupported Burgers shock-loss metric: {metric}")
+
+
+def edge_weighted_gradient_loss(prediction, target, dx, metric, huber_delta, edge_alpha, eps=1.0e-7):
+    pred_gradient = (prediction[..., 1:] - prediction[..., :-1]) / max(float(dx), eps)
+    target_gradient = (target[..., 1:] - target[..., :-1]) / max(float(dx), eps)
+    if float(edge_alpha) > 0.0:
+        gradient_scale = target_gradient.abs().mean(dim=-1, keepdim=True).clamp_min(eps)
+        weights = 1.0 + float(edge_alpha) * target_gradient.abs() / gradient_scale
+        pred_gradient = weights * pred_gradient
+        target_gradient = weights * target_gradient
+    return apply_loss_metric(pred_gradient, target_gradient, metric=metric, huber_delta=huber_delta)
+
+
+def cumulative_integral_loss(prediction, target, dx, metric, huber_delta):
+    pred_integral = torch.cumsum(prediction, dim=-1) * float(dx)
+    target_integral = torch.cumsum(target, dim=-1) * float(dx)
+    return apply_loss_metric(pred_integral, target_integral, metric=metric, huber_delta=huber_delta)
+
+
+def compute_burgers_shock_loss(u_pred, target, dx, shock_loss_config=None):
+    if not shock_loss_config:
+        return relative_error(u_pred, target)
+
+    metric = shock_loss_config.get("metric", "huber")
+    huber_delta = float(shock_loss_config.get("huber_delta", 0.01))
+    state_weight = float(shock_loss_config.get("state_weight", 1.0))
+    integral_weight = float(shock_loss_config.get("integral_weight", 0.0))
+    gradient_weight = float(shock_loss_config.get("gradient_weight", 0.0))
+    gradient_edge_alpha = float(shock_loss_config.get("gradient_edge_alpha", 0.0))
+    conservation_weight = float(shock_loss_config.get("conservation_weight", 0.0))
+    range_weight = float(shock_loss_config.get("range_weight", 0.0))
+    range_min = shock_loss_config.get("range_min")
+    range_max = shock_loss_config.get("range_max")
+
+    loss = torch.zeros((), device=u_pred.device, dtype=u_pred.dtype)
+
+    if state_weight > 0.0:
+        loss = loss + state_weight * apply_loss_metric(u_pred, target, metric=metric, huber_delta=huber_delta)
+    if integral_weight > 0.0:
+        loss = loss + integral_weight * cumulative_integral_loss(
+            u_pred,
+            target,
+            dx=dx,
+            metric=metric,
+            huber_delta=huber_delta,
+        )
+    if gradient_weight > 0.0:
+        loss = loss + gradient_weight * edge_weighted_gradient_loss(
+            u_pred,
+            target,
+            dx=dx,
+            metric=metric,
+            huber_delta=huber_delta,
+            edge_alpha=gradient_edge_alpha,
+        )
+    if conservation_weight > 0.0:
+        loss = loss + conservation_weight * apply_loss_metric(
+            u_pred.mean(dim=-1),
+            target.mean(dim=-1),
+            metric=metric,
+            huber_delta=huber_delta,
+        )
+    if range_weight > 0.0:
+        range_penalty = torch.zeros((), device=u_pred.device, dtype=u_pred.dtype)
+        if range_min is not None:
+            range_penalty = range_penalty + torch.relu(float(range_min) - u_pred).square().mean()
+        if range_max is not None:
+            range_penalty = range_penalty + torch.relu(u_pred - float(range_max)).square().mean()
+        loss = loss + range_weight * range_penalty
+
+    return loss
 
 
 def resolve_rollout(rollout_schedule, epoch):
@@ -83,6 +190,7 @@ def main():
         boundary=config.get("boundary", "outflow"),
         u_left_bc=config.get("u_left"),
         u_right_bc=config.get("u_right"),
+        **resolve_stabilizer_kwargs(config),
     )
     model = NeurDE(
         alpha_layer=[1] + [config["hidden_dim"]] * config["num_layers"],
@@ -100,12 +208,29 @@ def main():
     epochs = args.epochs_override or int(stage2["epochs"])
     rollout_schedule = stage2.get("rollout_schedule", [{"rollout": 1, "epochs": 0}])
     grad_clip_norm = float(stage2.get("grad_clip_norm", 1.0))
+    use_tvd = bool(stage2.get("TVD", stage2.get("use_tvd", False)))
+    tvd_weight = float(stage2.get("tvd_weight", 0.0))
+    curvature_weight = float(stage2.get("curvature_weight", 0.0))
+    shock_loss_config = dict(stage2.get("shock_loss", {}))
+    if shock_loss_config:
+        if "range_min" not in shock_loss_config and config.get("macro_range_min") is not None:
+            shock_loss_config["range_min"] = float(config.get("macro_range_min"))
+        if "range_max" not in shock_loss_config and config.get("macro_range_max") is not None:
+            shock_loss_config["range_max"] = float(config.get("macro_range_max"))
 
     print(
         f"Stage-2 Burgers fine-tune on {args.device}. train_count={train_count}, "
         f"epochs={epochs}, pretrained={pretrained_path}"
     )
     print(f"Rollout schedule: {rollout_schedule}")
+    print(
+        f"TVD enabled={use_tvd}, tvd_weight={tvd_weight}, curvature_weight={curvature_weight}, "
+        f"grad_clip_norm={grad_clip_norm}"
+    )
+    if shock_loss_config:
+        print(f"Shock-aware loss config: {shock_loss_config}")
+    else:
+        print("Shock-aware loss config: disabled")
 
     best_loss = float("inf")
     best_path = os.path.join(results_dir, "burgers_stage2_best.pt")
@@ -137,7 +262,17 @@ def main():
                 F, _, _ = solver.step(F, feq_pred)
                 u_next = solver.macro(F)
                 target = all_u[start + step + 1]
-                loss = loss + relative_error(u_next, target)
+                step_loss = compute_burgers_shock_loss(
+                    u_next,
+                    target,
+                    dx=solver.dx,
+                    shock_loss_config=shock_loss_config,
+                )
+                if use_tvd:
+                    step_loss = step_loss + tvd_weight * local_variation_increase_penalty(u_next, u_current)
+                    if curvature_weight > 0.0:
+                        step_loss = step_loss + curvature_weight * local_curvature_increase_penalty(u_next, u_current)
+                loss = loss + step_loss
             loss = loss / float(current_rollout)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip_norm)

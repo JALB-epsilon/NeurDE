@@ -1,0 +1,45 @@
+X: 401
+Qn: 9
+lattice: D2Q9
+equilibrium_mode: maxent
+lam: 1.0
+omega: 1.3
+domain_length: 1.0
+boundary: periodic
+initial_condition: sinusoidal
+sine_mean: 0.6
+sine_amplitude: 0.4
+sine_wavenumber: 1.0
+sine_phase: 0.0
+data_dir: data_workspace/burgers_case_d2q9_maxent_sinusoidal_1000.h5
+results_dir: results_d2q9_maxent_sinusoidal_train400of1000
+hidden_dim: 32
+num_layers: 3
+newton_steps: 50
+newton_tol: 1.0e-10
+logit_clip: 15.0
+conservative_output: true
+macro_limiter: conservative_clamp
+macro_range_min: 0.2
+macro_range_max: 1.0
+macro_target_mean: 0.6
+stage2:
+  pretrained_path: results_d2q9_maxent_sinusoidal_train400of1000/burgers_stage1.pt
+  results_dir: results_d2q9_maxent_sinusoidal_train400of1000_stage2_tvd
+  num_samples: 1000
+  train_count: 400
+  epochs: 64
+  lr: 0.0002
+  grad_clip_norm: 1.0
+  TVD: true
+  tvd_weight: 5.0
+  curvature_weight: 1.0
+  rollout_schedule:
+    - rollout: 1
+      epochs: 12
+    - rollout: 4
+      epochs: 12
+    - rollout: 8
+      epochs: 12
+    - rollout: 16
+      epochs: 0

@@ -7,7 +7,7 @@ import yaml
 from torch.utils.data import DataLoader, TensorDataset
 
 from architectures import NeurDE
-from burgers_solver import BurgersSolver, default_config_path, resolve_config_path, resolve_module_path
+from burgers_solver import BurgersSolver, default_config_path, resolve_config_path, resolve_module_path, resolve_stabilizer_kwargs
 
 
 def compute_split_index(total_steps, train_fraction):
@@ -22,6 +22,7 @@ def main():
     parser.add_argument("--num_samples", type=int, default=None)
     parser.add_argument("--train_fraction", type=float, default=0.5)
     parser.add_argument("--train_count", type=int, default=None)
+    parser.add_argument("--epochs_override", type=int, default=None)
     args = parser.parse_args()
 
     config_path = resolve_config_path(args.config)
@@ -65,6 +66,7 @@ def main():
         boundary=config.get("boundary", "outflow"),
         u_left_bc=config.get("u_left"),
         u_right_bc=config.get("u_right"),
+        **resolve_stabilizer_kwargs(config),
     )
 
     model = NeurDE(
@@ -86,7 +88,8 @@ def main():
         f"Training Burgers on {split_idx}/{limit} snapshots ({split_label}, "
         f"conservative_output={conservative_output}, logit_clip={config.get('logit_clip', 15.0)})"
     )
-    for epoch in range(config["train"]["epochs"]):
+    epochs = args.epochs_override or int(config["train"]["epochs"])
+    for epoch in range(epochs):
         epoch_loss = 0.0
         for u_batch, feq_batch in dataloader:
             inputs = u_batch.unsqueeze(1).unsqueeze(2).to(device)
