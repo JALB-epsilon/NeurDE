@@ -8,7 +8,6 @@ import os
 from torch.utils.data import DataLoader
 from train_stage_1 import create_basis
 from SOD_solver import SODSolver
-from exact_solution import build_exact_macro_rollout
 import torch.nn as nn
 
 if __name__ == "__main__":
@@ -16,30 +15,17 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description='Train Stage 2')
     parser.add_argument('--device', type=int, default=3, help='Device index')
-    parser.add_argument('--case', type=int, choices=[1, 2], default=None, help='Case 1 or 2')
     parser.add_argument("--compile", dest='compile', action='store_true', help='Compile', default=False)
     parser.add_argument('--save_model', action='store_true', help='Save model checkpoints (enabled by default)')
     parser.add_argument('--no_save_model', dest='save_model', action='store_false', help='Disable model checkpoint saving')
     parser.add_argument('--num_samples', type=int, default=500, help='Number of samples')
-    parser.add_argument("--save_frequency", type=int, default=1, help='Save model')
+    parser.add_argument("--save_frequency", default=1, help='Save model')
     parser.add_argument("--TVD", dest='TVD', action='store_true', help='TVD norm', default=False)
-    parser.add_argument("--disable_tvd", action='store_true', help='Disable TVD even if enabled in the YAML')
     parser.add_argument("--pre_trained_path", type=str, default=None)
-    parser.add_argument("--epochs_override", type=int, default=None)
-    parser.add_argument("--rollout_override", type=int, default=None)
-    parser.add_argument("--supervision_override", type=str, default=None)
-    parser.add_argument("--learn_target_override", type=str, default=None)
-    parser.add_argument("--model_dir_override", type=str, default=None)
-    parser.add_argument("--batch_size_override", type=int, default=None)
-    parser.add_argument("--lr_override", type=float, default=None)
-    parser.add_argument("--feq_mode_override", type=str, default=None)
-    parser.add_argument("--geq_mode_override", type=str, default=None)
-    parser.add_argument("--dtype", type=str, default="float32", choices=["float32", "float64"])
     parser.set_defaults(save_model=True)
     args = parser.parse_args()
 
     device = get_device(args.device)
-    dtype = resolve_torch_dtype(args.dtype)
     if args.pre_trained_path:
         args.pre_trained_path = args.pre_trained_path.replace("SOD_shock_tube/", "")
         print(args.pre_trained_path)
@@ -48,7 +34,7 @@ if __name__ == "__main__":
         args.case = int(case_number)
         print(args.case)
 
-    elif args.case is None:
+    else: 
         args.case = 1
 
     with open("Sod_cases_param.yml", 'r') as stream:
@@ -69,45 +55,15 @@ if __name__ == "__main__":
         muy=case_params['muy'],
         Uax=case_params['Uax'],
         Uay=case_params['Uay'],
-        device=case_params['device'],
-        dtype=dtype,
+        device=case_params['device']
     )
 
     with open("Sod_cases_param_training.yml", 'r') as stream:
         training_config = yaml.safe_load(stream)
     param_training = training_config[args.case]
-    if args.rollout_override is not None:
-        param_training["stage2"]["N"] = int(args.rollout_override)
-    if args.epochs_override is not None:
-        param_training["stage2"]["epochs"] = int(args.epochs_override)
-    if args.supervision_override is not None:
-        param_training["stage2"]["supervision"] = str(args.supervision_override)
-    if args.learn_target_override is not None:
-        param_training["stage2"]["learn_target"] = str(args.learn_target_override)
-    if args.model_dir_override is not None:
-        param_training["stage2"]["model_dir"] = str(args.model_dir_override)
-    if args.batch_size_override is not None:
-        param_training["stage2"]["batch_size"] = int(args.batch_size_override)
-    if args.lr_override is not None:
-        param_training["stage2"]["lr"] = float(args.lr_override)
-    if args.feq_mode_override is not None:
-        param_training.setdefault("model", {})["feq_mode"] = str(args.feq_mode_override)
-    if args.geq_mode_override is not None:
-        param_training.setdefault("model", {})["geq_mode"] = str(args.geq_mode_override)
-    model_config = get_model_config(param_training)
     number_of_rollout = param_training["stage2"]["N"]
-    supervision_mode = param_training["stage2"].get("supervision", "geq").lower()
-    if supervision_mode not in {"geq", "feq", "exact_macro", "macro"}:
-        raise ValueError(f"Unsupported stage-2 supervision mode: {supervision_mode}")
-    learn_target = resolve_stage_target(param_training["stage2"])
-    if learn_target == "both" and supervision_mode not in {"exact_macro", "macro"}:
-        raise ValueError("learn_target=both is only supported for macro-based stage-2 supervision.")
-    use_analytic_feq = learn_target == "geq"
-    use_analytic_geq = learn_target == "feq"
-    needs_model_feq_base = False
-    needs_model_geq_base = learn_target in {"geq", "both"} and model_config["geq_mode"] == "constrained"
 
-    if "TVD" in param_training["stage2"] and not args.disable_tvd:
+    if "TVD" in param_training["stage2"]:
         args.TVD = True
 
 
@@ -120,42 +76,21 @@ if __name__ == "__main__":
                                     all_Feq=all_Feq[:args.num_samples],
                                     all_Geq=all_Geq[:args.num_samples],
                                     number_of_rollout=number_of_rollout,
-                                    dtype=dtype,
                                     )
 
-    stage2_batch_size = param_training["stage2"].get("batch_size", 1)
-    dataloader = DataLoader(dataset, batch_size=stage2_batch_size, shuffle=False, num_workers=4, pin_memory=True)
+    dataloader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=4, pin_memory=True)  # batch size 1 to get each sequence.
 
  
     val_dataset = SodDataset_stage2(F = all_F[args.num_samples:args.num_samples+100],
                                     G=all_G[args.num_samples:args.num_samples+100],
                                     Feq=all_Feq[args.num_samples:args.num_samples+100],
-                                    Geq=all_Geq[args.num_samples:args.num_samples+100],
-                                    dtype=dtype,)
-
-    if supervision_mode in {"exact_macro", "macro"}:
-        exact_steps = args.num_samples + len(val_dataset) + 1
-        exact_rho, exact_ux, exact_uy, exact_T = build_exact_macro_rollout(
-            case_params,
-            exact_steps,
-            backend="torch",
-            dtype=dtype_name_from_torch(dtype),
-            device=device,
-        )
+                                    Geq=all_Geq[args.num_samples:args.num_samples+100],)
     
     model = NeurDE(
         alpha_layer=[4] + [param_training["hidden_dim"]] * param_training["num_layers"],
         phi_layer=[2] + [param_training["hidden_dim"]] * param_training["num_layers"],
-        activation='relu',
-        learn_feq=learn_target in {"feq", "both"},
-        learn_geq=learn_target in {"geq", "both"},
-        feq_mode=model_config["feq_mode"],
-        geq_mode=model_config["geq_mode"],
-        cv=1.0 / (case_params["vuy"] - 1.0),
-        logit_clip=model_config["logit_clip"],
-        newton_iters=model_config["newton_iters"],
-        newton_tolerance=model_config["newton_tolerance"],
-    ).to(device=device, dtype=dtype)
+        activation='relu'
+    ).to(device)
 
     if args.compile:
         model = torch.compile(model)
@@ -169,10 +104,10 @@ if __name__ == "__main__":
 
     if args.pre_trained_path:
         if args.compile:
-            checkpoint = torch.load(args.pre_trained_path, map_location=device)
+            checkpoint = torch.load(args.pre_trained_path)
             model.load_state_dict(checkpoint)
         elif not args.compile:
-            checkpoint = torch.load(args.pre_trained_path, map_location=device)
+            checkpoint = torch.load(args.pre_trained_path)
             new_state_dict = {}
 
             for k, v in checkpoint.items():
@@ -195,15 +130,12 @@ if __name__ == "__main__":
     scheduler = get_scheduler(optimizer, scheduler_type, total_steps, scheduler_config)
     
     Uax, Uay = case_params["Uax"], case_params["Uay"]
-    basis = create_basis(Uax, Uay, device, dtype=dtype)
+    basis = create_basis(Uax, Uay, device)
 
     epochs = param_training["stage2"]["epochs"]
-    loss_func = calculate_batch_relative_error
+    loss_func = calculate_relative_error
 
-    print(
-        f"Training Case {args.case} on {device}. Epochs: {epochs}, "
-        f"Samples: {args.num_samples}, supervision={supervision_mode}, learn_target={learn_target}"
-    )
+    print(f"Training Case {args.case} on {device}. Epochs: {epochs}, Samples: {args.num_samples}")
 
     best_losses = [float('inf')] * 3
     best_models = [None] * 3
@@ -213,6 +145,12 @@ if __name__ == "__main__":
     epochs_since_last_save = [0] * 3
     last_epoch_loss = 0.0
 
+    # Get the first batch from the dataloader
+    first_batch = next(iter(dataloader))
+    Fi0, Gi0, Feq_seq, Geq_seq = first_batch
+    Fi0 = Fi0[0, 0, ...].to(device)
+    Gi0 = Gi0[0, 0, ...].to(device)
+
     if args.TVD:
         print("Using TVD")
         if args.compile:
@@ -221,118 +159,43 @@ if __name__ == "__main__":
     for epoch in tqdm(range(epochs), desc="Epochs"):
         loss_epoch = 0
         if args.TVD:
-            tvd_weight = 15
+            ux_old = torch.zeros_like(Fi0[1, ...])
+            T_old = torch.zeros_like(Fi0[1, ...])
+            rho_old = torch.zeros_like(Fi0[1, ...])
+            if args.TVD:
+                tvd_weight = 15
         for batch_idx, (F_seq, G_seq, Feq_seq, Geq_seq) in enumerate(dataloader):
             optimizer.zero_grad()
             model.train()
-            F_seq = F_seq.to(device=device, dtype=dtype)
-            G_seq = G_seq.to(device=device, dtype=dtype)
-            if supervision_mode == "geq":
-                Geq_seq = Geq_seq.to(device=device, dtype=dtype)
-            elif supervision_mode == "feq":
-                Feq_seq = Feq_seq.to(device=device, dtype=dtype)
-            batch_size = F_seq.shape[0]
-            batch_start_indices = torch.arange(
-                batch_idx * stage2_batch_size,
-                batch_idx * stage2_batch_size + batch_size,
-                device=device,
-                dtype=torch.long,
-            )
-            Fi0 = F_seq[:, 0, ...]
-            Gi0 = G_seq[:, 0, ...]
-            total_loss = torch.zeros((), device=device, dtype=dtype)
-            if args.TVD:
-                ux_old = None
-                T_old = None
-                rho_old = None
-            khi = None
-            zetax = None
-            zetay = None
-            for rollout in range(number_of_rollout):
+            total_loss = 0
+            F_seq = F_seq.to(device)
+            G_seq = G_seq.to(device)
+            Fi0 = F_seq[0, 0, ...]
+            Gi0 = G_seq[0, 0, ...]
+            for rollout in range(number_of_rollout):       
                 rho, ux, uy, E = sod_solver.get_macroscopic(Fi0, Gi0)
                 T = sod_solver.get_temp_from_energy(ux, uy, E)
-                inputs = torch.stack([rho, ux, uy, T], dim=1)
-                Feq_base = None
-                Geq_base = None
-                if use_analytic_feq or needs_model_feq_base:
-                    Feq_base = sod_solver.get_Feq(rho, ux, uy, T)
-                if use_analytic_geq or needs_model_geq_base:
-                    if khi is None:
-                        khi = torch.zeros_like(ux)
-                        zetax = torch.zeros_like(ux)
-                        zetay = torch.zeros_like(ux)
-                    Geq_base, khi, zetax, zetay = sod_solver.get_Geq_Newton_solver(
-                        rho,
-                        ux,
-                        uy,
-                        T,
-                        khi,
-                        zetax,
-                        zetay,
-                    )
-                equilibrium_pred = model(
-                    inputs,
-                    basis,
-                    feq_base=Feq_base if needs_model_feq_base else None,
-                    geq_base=Geq_base if needs_model_geq_base else None,
-                )
-                if learn_target == "both":
-                    Feq_pred_flat, Geq_pred_flat = equilibrium_pred
-                    Feq = Feq_pred_flat.reshape(batch_size, sod_solver.Y, sod_solver.X, sod_solver.Qn).permute(0, 3, 1, 2)
-                    Geq = Geq_pred_flat.reshape(batch_size, sod_solver.Y, sod_solver.X, sod_solver.Qn).permute(0, 3, 1, 2)
-                else:
-                    equilibrium_pred_flat = equilibrium_pred
-                    equilibrium_pred = equilibrium_pred_flat.reshape(batch_size, sod_solver.Y, sod_solver.X, sod_solver.Qn).permute(0, 3, 1, 2)
-                    if learn_target == "geq":
-                        Feq = Feq_base
-                        Geq = equilibrium_pred
-                    else:
-                        Feq = equilibrium_pred
-                        Geq = Geq_base
-                Fi_next, Gi_next = sod_solver.collision(Fi0, Gi0, Feq, Geq, rho, ux, uy, T)
-                Fi_next, Gi_next = sod_solver.streaming(Fi_next, Gi_next)
-
-                if supervision_mode in {"exact_macro", "macro"}:
-                    rho_next, ux_next, uy_next, E_next = sod_solver.get_macroscopic(Fi_next, Gi_next)
-                    T_next = sod_solver.get_temp_from_energy(ux_next, uy_next, E_next)
-                    target_indices = batch_start_indices + rollout + 1
-                    target_macro = torch.stack(
-                        [
-                            exact_rho[target_indices],
-                            exact_ux[target_indices],
-                            exact_uy[target_indices],
-                            exact_T[target_indices],
-                        ],
-                        dim=1,
-                    )
-                    pred_macro = torch.stack([rho_next, ux_next, uy_next, T_next], dim=1)
-                    total_loss = total_loss + loss_func(pred_macro, target_macro)
-                elif supervision_mode == "feq":
-                    Feq_target = Feq_seq[:, rollout]
-                    pred_batch = equilibrium_pred_flat.reshape(batch_size, sod_solver.Y * sod_solver.X, sod_solver.Qn)
-                    target_batch = Feq_target.permute(0, 2, 3, 1).reshape(batch_size, sod_solver.Y * sod_solver.X, sod_solver.Qn)
-                    total_loss = total_loss + loss_func(pred_batch, target_batch)
-                else:
-                    Geq_target = Geq_seq[:, rollout]
-                    pred_batch = equilibrium_pred_flat.reshape(batch_size, sod_solver.Y * sod_solver.X, sod_solver.Qn)
-                    target_batch = Geq_target.permute(0, 2, 3, 1).reshape(batch_size, sod_solver.Y * sod_solver.X, sod_solver.Qn)
-                    total_loss = total_loss + loss_func(pred_batch, target_batch)
-
-                if args.TVD and ux_old is not None:
-                    loss_TVD = TVD_norm(T, T_old) + TVD_norm(ux, ux_old) + TVD_norm(rho, rho_old)
-                    total_loss = total_loss + tvd_weight * loss_TVD
-                if args.TVD:
+                Feq = sod_solver.get_Feq(rho, ux, uy, T)
+                inputs = torch.stack([rho.unsqueeze(0), ux.unsqueeze(0), uy.unsqueeze(0), T.unsqueeze(0)], dim=1).to(device)
+                Geq_pred = model(inputs, basis)
+                Geq_target = Geq_seq[0, rollout].to(device)
+                inner_loss = loss_func(Geq_pred, Geq_target.permute(1, 2, 0).reshape(-1, 9))
+                total_loss += inner_loss
+                if args.TVD and rollout > 0:
+                    loss_TVD = TVD_norm(T, T_old)+TVD_norm(ux, ux_old)+TVD_norm(rho, rho_old)
                     ux_old = ux.clone()
                     T_old = T.clone()
                     rho_old = rho.clone()
-
-                Fi0, Gi0 = Fi_next, Gi_next
-            total_loss = total_loss / float(number_of_rollout)
+                    total_loss += tvd_weight*loss_TVD
+                Fi0, Gi0 = sod_solver.collision(Fi0, Gi0, Feq, Geq_pred.permute(1, 0).reshape(sod_solver.Qn, sod_solver.Y, sod_solver.X), rho, ux, uy, T)
+                Fi, Gi = sod_solver.streaming(Fi0, Gi0)
+                Fi0 = Fi.detach()
+                Gi0 = Gi.detach()
             total_loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
             loss_epoch += total_loss.item()
-            print(f"Epoch: {epoch}, Batch ID: {batch_idx}, Loss: {total_loss.item():.6f}")
+            print(f"Epoch: {epoch}, Batch ID: {batch_idx}, Loss: {total_loss.item()/number_of_rollout:.6f}")
 
         scheduler.step()
 
@@ -346,83 +209,23 @@ if __name__ == "__main__":
         model.eval()
         val_loss = 0.0
         with torch.no_grad():
-            Fi0 = next(iter(val_dataset))[0].to(device).unsqueeze(0)
-            Gi0 = next(iter(val_dataset))[1].to(device).unsqueeze(0)
-            khi = None
-            zetax = None
-            zetay = None
+            Fi0 = next(iter(val_dataset))[0].to(device)
+            Gi0 = next(iter(val_dataset))[1].to(device)
             
-            for val_idx, (F_val, G_val, Feq_val, Geq_val) in enumerate(val_dataset):
+            for F_val, G_val, Feq_val, Geq_val in val_dataset:
                 rho, ux, uy, E = sod_solver.get_macroscopic(Fi0, Gi0)
                 T = sod_solver.get_temp_from_energy(ux, uy, E)
-                inputs = torch.stack([rho, ux, uy, T], dim=1)
-                Feq_base = None
-                Geq_base = None
-                if use_analytic_feq or needs_model_feq_base:
-                    Feq_base = sod_solver.get_Feq(rho, ux, uy, T)
-                if use_analytic_geq or needs_model_geq_base:
-                    if khi is None:
-                        khi = torch.zeros_like(ux)
-                        zetax = torch.zeros_like(ux)
-                        zetay = torch.zeros_like(ux)
-                    Geq_base, khi, zetax, zetay = sod_solver.get_Geq_Newton_solver(
-                        rho,
-                        ux,
-                        uy,
-                        T,
-                        khi,
-                        zetax,
-                        zetay,
-                    )
-                equilibrium_pred = model(
-                    inputs,
-                    basis,
-                    feq_base=Feq_base if needs_model_feq_base else None,
-                    geq_base=Geq_base if needs_model_geq_base else None,
-                )
-                if learn_target == "both":
-                    Feq_pred_flat, Geq_pred_flat = equilibrium_pred
-                    Feq = Feq_pred_flat.reshape(1, sod_solver.Y, sod_solver.X, sod_solver.Qn).permute(0, 3, 1, 2)
-                    Geq = Geq_pred_flat.reshape(1, sod_solver.Y, sod_solver.X, sod_solver.Qn).permute(0, 3, 1, 2)
-                else:
-                    equilibrium_pred_flat = equilibrium_pred
-                    equilibrium_pred = equilibrium_pred_flat.reshape(1, sod_solver.Y, sod_solver.X, sod_solver.Qn).permute(0, 3, 1, 2)
-                    if learn_target == "geq":
-                        Feq = Feq_base
-                        Geq = equilibrium_pred
-                    else:
-                        Feq = equilibrium_pred
-                        Geq = Geq_base
-                Fi_next, Gi_next = sod_solver.collision(Fi0, Gi0, Feq, Geq, rho, ux, uy, T)
-                Fi_next, Gi_next = sod_solver.streaming(Fi_next, Gi_next)
-
-                if supervision_mode in {"exact_macro", "macro"}:
-                    rho_next, ux_next, uy_next, E_next = sod_solver.get_macroscopic(Fi_next, Gi_next)
-                    T_next = sod_solver.get_temp_from_energy(ux_next, uy_next, E_next)
-                    target_index = args.num_samples + val_idx + 1
-                    target_macro = torch.stack(
-                        [
-                            exact_rho[target_index],
-                            exact_ux[target_index],
-                            exact_uy[target_index],
-                            exact_T[target_index],
-                        ],
-                        dim=0,
-                    ).unsqueeze(0)
-                    pred_macro = torch.stack([rho_next, ux_next, uy_next, T_next], dim=1)
-                    val_loss += loss_func(pred_macro, target_macro)
-                elif supervision_mode == "feq":
-                    Feq_target = Feq_val.to(device).unsqueeze(0)
-                    pred_batch = equilibrium_pred_flat.reshape(1, sod_solver.Y * sod_solver.X, sod_solver.Qn)
-                    target_batch = Feq_target.permute(0, 2, 3, 1).reshape(1, sod_solver.Y * sod_solver.X, sod_solver.Qn)
-                    val_loss += loss_func(pred_batch, target_batch)
-                else:
-                    Geq_target = Geq_val.to(device).unsqueeze(0)
-                    pred_batch = equilibrium_pred_flat.reshape(1, sod_solver.Y * sod_solver.X, sod_solver.Qn)
-                    target_batch = Geq_target.permute(0, 2, 3, 1).reshape(1, sod_solver.Y * sod_solver.X, sod_solver.Qn)
-                    val_loss += loss_func(pred_batch, target_batch)
-
-                Fi0, Gi0 = Fi_next, Gi_next
+                Feq = sod_solver.get_Feq(rho, ux, uy, T)
+                inputs = torch.stack([rho.unsqueeze(0), ux.unsqueeze(0), uy.unsqueeze(0), T.unsqueeze(0)], dim=1).to(device)
+                Geq_pred = model(inputs, basis)
+                Geq_target = Geq_val.to(device)
+                inner_loss = loss_func(Geq_pred, Geq_target.permute(1, 2, 0).reshape(-1, 9))
+                #print(inner_loss)
+                val_loss += inner_loss
+                Fi0, Gi0 = sod_solver.collision(Fi0, Gi0, Feq, Geq_pred.permute(1, 0).reshape(sod_solver.Qn, sod_solver.Y, sod_solver.X), rho, ux, uy, T)
+                Fi, Gi = sod_solver.streaming(Fi0, Gi0)
+                Fi0 = Fi.detach()
+                Gi0 = Gi.detach()
             val_loss /= len(val_dataset)
             print("-" * 50)
             print(f"Validation Loss: {val_loss:.6f}")

@@ -9,15 +9,6 @@
   muy: 0.025
   Uax: 0.057
   Uay: 0.0
-  exact_x0: 1500.5
-  exact_left_state:
-    rho: 0.5
-    u: 0.0
-    p: 0.1
-  exact_right_state:
-    rho: 2.0
-    u: 0.0
-    p: 0.05
   initial_conditions_func: 'case_1_initial_conditions'
   filename: 'SOD_case1.h5'
 2:
@@ -31,14 +22,5 @@
   muy: 1.0e-4 
   Uax: 0.4
   Uay: 0.0
-  exact_x0: 1500.5
-  exact_left_state:
-    rho: 1.0
-    u: 0.0
-    p: 0.2
-  exact_right_state:
-    rho: 0.125
-    u: 0.0
-    p: 0.02
   initial_conditions_func: 'case_2_initial_conditions'
   filename: 'SOD_case2.h5'

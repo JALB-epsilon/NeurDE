@@ -1,19 +1,9 @@
+ 
 import numpy as np
-import torch
 from scipy.sparse import csc_matrix
 from scipy.sparse.linalg import spsolve
 from scipy.io import loadmat
 from scipy.sparse import coo_matrix
-
-
-def _multinv_torch(M):
-    """Batched matrix inverse used by the torch Levermore Newton solver."""
-    reg_val = 1e-12
-    m = M.shape[-1]
-    eye = torch.eye(m, dtype=M.dtype, device=M.device)
-    eye = eye.reshape((1,) * (M.dim() - 2) + (m, m)).expand(M.shape)
-    return torch.linalg.solve(M + reg_val * eye, eye)
-
 
 def multinv(M):
     # Check if the input is a square matrix for the first two dimensions
@@ -59,3 +49,4 @@ def multinv(M):
     X = X.transpose(0,2,1)
     X = np.reshape(X,((n,m)+sn[2:]),order ="F")
     return X
+

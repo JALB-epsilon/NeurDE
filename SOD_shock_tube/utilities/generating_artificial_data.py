@@ -1,20 +1,18 @@
 import torch
 import torch.nn as nn
-from .basic import resolve_torch_dtype
 
 class GeneratingData(nn.Module):
-    def __init__(self, device, Uax, Uay, Qn, X, Y, dtype=torch.float32):
+    def __init__(self, device, Uax, Uay, Qn, X, Y):
         super(GeneratingData, self).__init__()
         self.device = device
-        self.dtype = resolve_torch_dtype(dtype)
         ex_values = [1, 0, -1, 0, 1, -1, -1, 1, 0]
         ey_values = [0, 1, 0, -1, 1, 1, -1, -1, 0]
         self.Uax = Uax
         self.Uay = Uay
-        self.ex = torch.tensor(ex_values, dtype=self.dtype, device=self.device) + self.Uax
-        self.ey = torch.tensor(ey_values, dtype=self.dtype, device=self.device) + self.Uay
-        self.ex1 = torch.tensor(ex_values, dtype=self.dtype, device=self.device)
-        self.ey1 = torch.tensor(ey_values, dtype=self.dtype, device=self.device)
+        self.ex = torch.tensor(ex_values, dtype=torch.float32, device=self.device) + self.Uax
+        self.ey = torch.tensor(ey_values, dtype=torch.float32, device=self.device) + self.Uay
+        self.ex1 = torch.tensor(ex_values, dtype=torch.float32, device=self.device)
+        self.ey1 = torch.tensor(ey_values, dtype=torch.float32, device=self.device)
         self.Qn = Qn
         self.X = X
         self.Y = Y
@@ -27,10 +25,10 @@ class GeneratingData(nn.Module):
 
     def forward(self, samples):
         # Generate samples with values between -0.1 and 0.1
-        alpha00 = (torch.rand(samples, self.Y, self.X, device=self.device, dtype=self.dtype) * 0.2) - 0.1
-        alpha10 = (torch.rand(samples, self.Y, self.X, device=self.device, dtype=self.dtype) * 0.2) - 0.1
-        alpha01 = (torch.rand(samples, self.Y, self.X, device=self.device, dtype=self.dtype) * 0.2) - 0.1
-        alpha11 = (torch.rand(samples, self.Y, self.X, device=self.device, dtype=self.dtype) * 0.2) - 0.1
+        alpha00 = (torch.rand(samples, self.Y, self.X, device=self.device) * 0.2) - 0.1
+        alpha10 = (torch.rand(samples, self.Y, self.X, device=self.device) * 0.2) - 0.1
+        alpha01 = (torch.rand(samples, self.Y, self.X, device=self.device) * 0.2) - 0.1
+        alpha11 = (torch.rand(samples, self.Y, self.X, device=self.device) * 0.2) - 0.1
 
         exponent = (alpha00[:, None, :, :] + alpha10[:, None, :, :] * self.ex[None, :, None, None] +
                     alpha01[:, None, :, :] * self.ey[None, :, None, None] +
