@@ -2,6 +2,62 @@ import torch
 import torch.nn as nn
 
 
+RESIDUAL_MODES = {"constrained", "residual", "residual_constrained"}
+
+
+def _compute_logits(alpha_net, phi_net, macro_state, basis, logit_clip):
+    flat_macro_state = macro_state.movedim(1, -1).reshape(-1, macro_state.shape[1])
+    alpha_coeffs = alpha_net(flat_macro_state)
+    basis_coeffs = phi_net(basis)
+    logits = torch.einsum("bi,ni->bn", alpha_coeffs, basis_coeffs)
+    if logit_clip is not None:
+        logits = logits.clamp(min=-logit_clip, max=logit_clip)
+    return logits, flat_macro_state
+
+
+def _flatten_population(population):
+    if population.ndim == 3:
+        return population.permute(0, 2, 1).reshape(-1, population.shape[1])
+    if population.ndim == 2:
+        return population
+    raise ValueError(f"Unsupported Burgers population tensor rank: {population.ndim}")
+
+
+def _build_burgers_moment_matrix(basis):
+    ex = basis[:, 0] if basis.shape[1] > 1 else basis[:, 0]
+    ones = torch.ones_like(ex)
+    return torch.stack([ones, ex], dim=0)
+
+
+def _burgers_targets(flat_macro_state):
+    u = flat_macro_state[:, 0]
+    flux = 0.5 * u.square()
+    return torch.stack([u, flux], dim=-1)
+
+
+def _build_nullspace_projector(moment_matrix):
+    gram = moment_matrix @ moment_matrix.transpose(0, 1)
+    return torch.eye(
+        moment_matrix.shape[1],
+        device=moment_matrix.device,
+        dtype=moment_matrix.dtype,
+    ) - moment_matrix.transpose(0, 1) @ torch.linalg.inv(gram) @ moment_matrix
+
+
+def _project_to_nonconserved(logits, moment_matrix):
+    projector = _build_nullspace_projector(moment_matrix)
+    return logits @ projector.transpose(0, 1)
+
+
+def _zero_last_linear(dense_net):
+    for layer in reversed(dense_net.layers):
+        if isinstance(layer, nn.Linear):
+            nn.init.zeros_(layer.weight)
+            nn.init.zeros_(layer.bias)
+            return
+    raise RuntimeError("DenseNet does not contain a linear layer to initialize.")
+
+
 def project_scalar_conservative_mass(population, flat_macro_state):
     target_moments = flat_macro_state[:, :1]
     moment_matrix = torch.ones((1, population.shape[-1]), device=population.device, dtype=population.dtype)
@@ -12,24 +68,58 @@ def project_scalar_conservative_mass(population, flat_macro_state):
 
 
 class EquilibriumHead(nn.Module):
-    def __init__(self, alpha_layer, phi_layer, activation, logit_clip=15.0, conservative_output=True):
+    def __init__(
+        self,
+        alpha_layer,
+        trunk_layer,
+        activation,
+        mode="positive",
+        logit_clip=15.0,
+    ):
         super().__init__()
         self.alpha = DenseNet(alpha_layer, activation)
-        self.phi = DenseNet(phi_layer, activation)
+        self.phi = DenseNet(trunk_layer, activation)
+        self.mode = str(mode).lower()
         self.logit_clip = logit_clip
-        self.conservative_output = bool(conservative_output)
 
-    def forward(self, macro_state, basis):
-        flat_macro_state = macro_state.movedim(1, -1).reshape(-1, macro_state.shape[1])
-        alpha_coeffs = self.alpha(flat_macro_state)
-        basis_coeffs = self.phi(basis)
-        logits = torch.einsum("bi,ni->bn", alpha_coeffs, basis_coeffs)
-        if self.logit_clip is not None:
-            logits = logits.clamp(min=-self.logit_clip, max=self.logit_clip)
-        population = torch.exp(logits)
-        if self.conservative_output:
-            population = project_scalar_conservative_mass(population, flat_macro_state)
-        return population
+        if self.mode not in {"positive", "projected_positive", "constrained", "residual", "residual_constrained"}:
+            raise ValueError(f"Unsupported Burgers equilibrium head mode: {mode}")
+        if self.mode not in {"positive", "projected_positive"}:
+            _zero_last_linear(self.alpha)
+
+    def forward(self, macro_state, basis, base_population=None):
+        logits, flat_macro_state = _compute_logits(
+            self.alpha,
+            self.phi,
+            macro_state,
+            basis,
+            self.logit_clip,
+        )
+
+        if self.mode == "positive":
+            return torch.exp(logits)
+
+        if self.mode == "projected_positive":
+            population = torch.exp(logits)
+            return project_scalar_conservative_mass(population, flat_macro_state)
+
+        if base_population is None:
+            raise ValueError(f"Burgers head in mode '{self.mode}' requires a baseline population.")
+
+        base_flat = _flatten_population(base_population).to(device=logits.device, dtype=logits.dtype)
+        if base_flat.shape != logits.shape:
+            raise ValueError(
+                f"Baseline population shape {base_flat.shape} does not match logits shape {logits.shape}."
+            )
+
+        moment_matrix = _build_burgers_moment_matrix(basis)
+        target_moments = _burgers_targets(flat_macro_state)
+        base_moments = base_flat @ moment_matrix.transpose(0, 1)
+        if not torch.allclose(base_moments, target_moments, rtol=1e-4, atol=1e-6):
+            raise ValueError("Baseline Burgers equilibrium does not satisfy the required moments.")
+
+        nonconserved_residual = _project_to_nonconserved(logits, moment_matrix)
+        return base_flat + nonconserved_residual
 
 
 class NeurDE(nn.Module):
@@ -41,31 +131,54 @@ class NeurDE(nn.Module):
         branch_layer=None,
         learn_feq=True,
         learn_geq=False,
+        feq_mode="positive",
+        geq_mode="positive",
         logit_clip=15.0,
-        conservative_output=True,
+        conservative_output=None,
     ):
         super().__init__()
         trunk_layer = phi_layer if phi_layer is not None else branch_layer
         if trunk_layer is None:
             raise ValueError("Either phi_layer or branch_layer must be provided.")
-        self.feq_head = EquilibriumHead(
-            alpha_layer,
-            trunk_layer,
-            activation,
-            logit_clip=logit_clip,
-            conservative_output=conservative_output,
-        ) if learn_feq else None
-        self.geq_head = EquilibriumHead(
-            alpha_layer,
-            trunk_layer,
-            activation,
-            logit_clip=logit_clip,
-            conservative_output=conservative_output,
-        ) if learn_geq else None
 
-    def forward(self, macro_state, basis):
-        feq = self.feq_head(macro_state, basis) if self.feq_head is not None else None
-        geq = self.geq_head(macro_state, basis) if self.geq_head is not None else None
+        resolved_feq_mode = str(feq_mode).lower() if feq_mode is not None else None
+        if resolved_feq_mode is None:
+            resolved_feq_mode = "projected_positive" if bool(conservative_output) else "positive"
+
+        self.feq_head = (
+            EquilibriumHead(
+                alpha_layer,
+                trunk_layer,
+                activation,
+                mode=resolved_feq_mode,
+                logit_clip=logit_clip,
+            )
+            if learn_feq
+            else None
+        )
+        self.geq_head = (
+            EquilibriumHead(
+                alpha_layer,
+                trunk_layer,
+                activation,
+                mode=str(geq_mode).lower(),
+                logit_clip=logit_clip,
+            )
+            if learn_geq
+            else None
+        )
+
+    def forward(self, macro_state, basis, feq_base=None, geq_base=None):
+        feq = (
+            self.feq_head(macro_state, basis, base_population=feq_base)
+            if self.feq_head is not None
+            else None
+        )
+        geq = (
+            self.geq_head(macro_state, basis, base_population=geq_base)
+            if self.geq_head is not None
+            else None
+        )
         if feq is not None and geq is not None:
             return feq, geq
         if feq is not None:

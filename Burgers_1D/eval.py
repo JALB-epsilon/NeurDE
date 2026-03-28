@@ -7,11 +7,13 @@ import math
 import torch
 import yaml
 
-from architectures import NeurDE
+from architectures import NeurDE, RESIDUAL_MODES
 from burgers_solver import (
     BurgersSolver,
     default_config_path,
     resolve_config_path,
+    resolve_artifact_path,
+    get_model_config,
     resolve_module_path,
     resolve_stabilizer_kwargs,
     resolve_torch_dtype,
@@ -33,6 +35,14 @@ def parse_plot_steps(raw_value):
             continue
         result.add(int(stripped))
     return result
+
+
+def model_output_slug(model_path):
+    model_stem = os.path.splitext(os.path.normpath(model_path))[0]
+    parts = [part for part in model_stem.split(os.sep) if part]
+    if not parts:
+        return "burgers_model"
+    return "__".join(parts[-4:])
 
 
 def plot_rollout_state(x, prediction, target, global_step, time_value, output_path, failure_step=None):
@@ -96,14 +106,22 @@ def main():
     config_path = resolve_config_path(args.config)
     with open(config_path, "r") as stream:
         config = yaml.safe_load(stream)
-    data_path = resolve_module_path(config["data_dir"])
-    model_path = resolve_module_path(args.model_path) if args.model_path is not None else resolve_module_path(
-        os.path.join(config["results_dir"], "burgers_stage1.pt")
+    artifact_root = config.get("artifact_root")
+    model_config = get_model_config(config)
+    data_path = resolve_artifact_path(config["data_dir"], artifact_root=artifact_root)
+    model_path = (
+        resolve_artifact_path(args.model_path, artifact_root=artifact_root)
+        if args.model_path is not None
+        else resolve_artifact_path(os.path.join(config["results_dir"], "burgers_stage1.pt"), artifact_root=artifact_root)
     )
-    conservative_output = config.get("conservative_output", config.get("match_mass", True))
     explicit_plot_steps = parse_plot_steps(args.plot_steps)
 
     with h5py.File(data_path, "r") as handle:
+        if "F" not in handle:
+            raise ValueError(
+                "Burgers evaluation requires population states saved as dataset 'F'. "
+                "Regenerate the dataset with Burgers_1D/burgers_solver.py."
+            )
         total_steps = handle["u"].shape[0]
         limit = total_steps if args.num_samples is None else min(args.num_samples, total_steps)
         if args.train_count is not None:
@@ -112,6 +130,7 @@ def main():
             default_start = compute_split_index(limit, args.train_fraction)
         start_step = default_start if args.start_step is None else max(0, min(args.start_step, limit - 1))
         end_step = limit if args.steps is None else min(limit, start_step + args.steps)
+        initial_F = torch.as_tensor(handle["F"][start_step], dtype=dtype)
         u_ref = torch.as_tensor(handle["u"][start_step:end_step], dtype=dtype)
         if u_ref.shape[0] == 0:
             raise ValueError("Evaluation slice is empty; adjust train_fraction/start_step/steps.")
@@ -138,22 +157,21 @@ def main():
     )
     model = NeurDE(
         alpha_layer=[1] + [config["hidden_dim"]] * config["num_layers"],
-        phi_layer=[1] + [config["hidden_dim"]] * config["num_layers"],
+        phi_layer=[solver.basis().shape[-1]] + [config["hidden_dim"]] * config["num_layers"],
         activation="relu",
         learn_feq=True,
         learn_geq=False,
-        logit_clip=config.get("logit_clip", 15.0),
-        conservative_output=conservative_output,
+        feq_mode=model_config["feq_mode"],
+        logit_clip=model_config["logit_clip"],
     ).to(device=device, dtype=dtype)
     model.load_state_dict(torch.load(model_path, map_location=device))
     model.eval()
 
     basis = solver.basis().to(device=device, dtype=dtype)
-    F = solver.equilibrium(u_ref[0].to(device).unsqueeze(0))
+    F = initial_F.to(device).unsqueeze(0)
 
     x = solver.x_grid()
-    model_stem = os.path.splitext(os.path.basename(model_path))[0]
-    out_dir = resolve_module_path(os.path.join("images", "eval", model_stem))
+    out_dir = resolve_module_path(os.path.join("images", "eval", model_output_slug(model_path)))
     os.makedirs(out_dir, exist_ok=True)
 
     rel_error = 0.0
@@ -174,7 +192,10 @@ def main():
                 break
             max_abs_u = max(max_abs_u, float(u.detach().abs().max().item()))
             inputs = u.unsqueeze(1).unsqueeze(2)
-            Feq_pred = model(inputs, basis).reshape(1, solver.X, solver.Qn).permute(0, 2, 1)
+            model_kwargs = {}
+            if model_config["feq_mode"] in RESIDUAL_MODES:
+                model_kwargs["feq_base"] = solver.equilibrium(u)
+            Feq_pred = model(inputs, basis, **model_kwargs).reshape(1, solver.X, solver.Qn).permute(0, 2, 1)
             if not torch.isfinite(Feq_pred).all():
                 failure_step = step
                 break
@@ -255,7 +276,8 @@ def main():
     message = (
         f"Average rollout relative error over {len(rel_errors)} Burgers steps "
         f"(start_step={start_step}, end_step={start_step + len(rel_errors) - 1}): "
-        f"{avg_error:.6f}; max|u|={max_abs_u:.6f}; conservative_output={conservative_output}"
+        f"{avg_error:.6f}; max|u|={max_abs_u:.6f}; feq_mode={model_config['feq_mode']}; "
+        f"data_path={data_path}; model_path={model_path}"
     )
     if failure_step is not None:
         message += f"; rollout became non-finite at local step {failure_step} (global step {start_step + failure_step})"

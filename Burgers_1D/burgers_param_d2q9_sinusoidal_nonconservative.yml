@@ -20,18 +20,15 @@ benchmark_snapshot_times:
   - 0.4
   - 0.5
 data_dir: data_workspace/burgers_case_d2q9_sinusoidal.h5
-results_dir: results/d2q9_sinusoidal/conservative/stage1
+results_dir: results/d2q9_sinusoidal/non_conservative/stage1
 hidden_dim: 32
 num_layers: 3
 newton_steps: 50
 newton_tol: 1.0e-10
 model:
-  feq_mode: projected_positive
+  feq_mode: positive
   logit_clip: 15.0
-macro_limiter: conservative_clamp
-macro_range_min: 0.2
-macro_range_max: 1.0
-macro_target_mean: 0.6
+macro_limiter: none
 train:
   supervision: feq
   epochs: 200
@@ -45,8 +42,8 @@ stage2:
   batch_size: 8
   supervision: macro
   grad_clip_norm: 1.0
-  results_dir: results/d2q9_sinusoidal/conservative/stage2
-  pretrained_path: results/d2q9_sinusoidal/conservative/stage1/burgers_stage1_best.pt
+  results_dir: results/d2q9_sinusoidal/non_conservative/stage2
+  pretrained_path: results/d2q9_sinusoidal/non_conservative/stage1/burgers_stage1_best.pt
   rollout_schedule:
     - rollout: 1
       epochs: 50

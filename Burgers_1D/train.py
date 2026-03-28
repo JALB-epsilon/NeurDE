@@ -6,12 +6,13 @@ import torch
 import yaml
 from torch.utils.data import DataLoader, TensorDataset
 
-from architectures import NeurDE
+from architectures import NeurDE, RESIDUAL_MODES
 from burgers_solver import (
     BurgersSolver,
     default_config_path,
     resolve_config_path,
-    resolve_module_path,
+    resolve_artifact_path,
+    get_model_config,
     resolve_stabilizer_kwargs,
     resolve_torch_dtype,
 )
@@ -37,9 +38,10 @@ def main():
     config_path = resolve_config_path(args.config)
     with open(config_path, "r") as stream:
         config = yaml.safe_load(stream)
-    data_path = resolve_module_path(config["data_dir"])
-    results_dir = resolve_module_path(config["results_dir"])
-    conservative_output = config.get("conservative_output", config.get("match_mass", True))
+    artifact_root = config.get("artifact_root")
+    data_path = resolve_artifact_path(config["data_dir"], artifact_root=artifact_root)
+    results_dir = resolve_artifact_path(config["results_dir"], artifact_root=artifact_root)
+    model_config = get_model_config(config)
     supervision_mode = str(config.get("train", {}).get("supervision", "feq")).lower()
     if supervision_mode not in {"feq", "macro"}:
         raise ValueError(f"Unsupported Burgers train.supervision: {supervision_mode}")
@@ -88,12 +90,12 @@ def main():
 
     model = NeurDE(
         alpha_layer=[1] + [config["hidden_dim"]] * config["num_layers"],
-        phi_layer=[1] + [config["hidden_dim"]] * config["num_layers"],
+        phi_layer=[solver.basis().shape[-1]] + [config["hidden_dim"]] * config["num_layers"],
         activation="relu",
         learn_feq=True,
         learn_geq=False,
-        logit_clip=config.get("logit_clip", 15.0),
-        conservative_output=conservative_output,
+        feq_mode=model_config["feq_mode"],
+        logit_clip=model_config["logit_clip"],
     ).to(device=device, dtype=dtype)
 
     basis = solver.basis().to(device=device, dtype=dtype)
@@ -103,17 +105,24 @@ def main():
     split_label = f"train_count={split_idx}" if args.train_count is not None else f"train_fraction={args.train_fraction:.3f}"
     print(
         f"Training Burgers on {split_idx}/{limit} snapshots ({split_label}, "
-        f"conservative_output={conservative_output}, logit_clip={config.get('logit_clip', 15.0)}, "
-        f"supervision={supervision_mode})"
+        f"feq_mode={model_config['feq_mode']}, logit_clip={model_config['logit_clip']}, "
+        f"supervision={supervision_mode}, data_path={data_path}, results_dir={results_dir})"
     )
     epochs = args.epochs_override or int(config["train"]["epochs"])
+    best_loss = float("inf")
+    best_state_dict = None
+    best_epoch = None
     for epoch in range(epochs):
         epoch_loss = 0.0
         for batch in dataloader:
             u_batch = batch[0].to(device=device, dtype=dtype)
             optimizer.zero_grad()
             inputs = u_batch.unsqueeze(1).unsqueeze(2)
-            feq_pred = model(inputs, basis)
+            model_kwargs = {}
+            if supervision_mode == "feq" and model_config["feq_mode"] in RESIDUAL_MODES:
+                with torch.no_grad():
+                    model_kwargs["feq_base"] = solver.equilibrium(u_batch)
+            feq_pred = model(inputs, basis, **model_kwargs)
             if supervision_mode == "feq":
                 feq_batch = batch[1].to(device=device, dtype=dtype)
                 targets = feq_batch.permute(0, 2, 1).reshape(-1, solver.Qn)
@@ -126,12 +135,28 @@ def main():
             optimizer.step()
             epoch_loss += loss.item()
 
+        avg_epoch_loss = epoch_loss / max(len(dataloader), 1)
+        if avg_epoch_loss < best_loss:
+            best_loss = avg_epoch_loss
+            best_epoch = epoch
+            best_state_dict = {key: value.detach().cpu().clone() for key, value in model.state_dict().items()}
+
         if epoch % 25 == 0:
-            print(f"Epoch {epoch}: loss={epoch_loss / max(len(dataloader), 1):.6f}")
+            print(f"Epoch {epoch}: loss={avg_epoch_loss:.6f}")
 
     output_path = os.path.join(results_dir, "burgers_stage1.pt")
-    torch.save(model.state_dict(), output_path)
-    print(f"Saved Burgers model to {output_path}")
+    best_path = os.path.join(results_dir, "burgers_stage1_best.pt")
+    last_path = os.path.join(results_dir, "burgers_stage1_last.pt")
+
+    if best_state_dict is None:
+        raise RuntimeError("Stage-1 training did not produce a valid checkpoint.")
+
+    torch.save(best_state_dict, output_path)
+    torch.save(best_state_dict, best_path)
+    torch.save(model.state_dict(), last_path)
+    print(f"Saved best Burgers model to {output_path} (epoch={best_epoch}, loss={best_loss:.6f})")
+    print(f"Saved explicit best checkpoint to {best_path}")
+    print(f"Saved last checkpoint to {last_path}")
 
 
 if __name__ == "__main__":

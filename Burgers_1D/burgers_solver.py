@@ -60,6 +60,41 @@ def resolve_module_path(path):
     return os.path.join(MODULE_DIR, path)
 
 
+def default_scratch_module_dir():
+    override = os.environ.get("NEURDE_BURGERS_ARTIFACT_ROOT")
+    if override:
+        return override
+
+    normalized = os.path.normpath(MODULE_DIR)
+    parts = normalized.split(os.sep)
+    if len(parts) >= 4 and parts[1] == "home":
+        return os.path.join(os.sep, "scratch", parts[2], *parts[3:])
+    return MODULE_DIR
+
+
+def resolve_artifact_root(artifact_root=None):
+    if artifact_root in (None, "", False):
+        return MODULE_DIR
+    if os.path.isabs(str(artifact_root)):
+        return str(artifact_root)
+
+    selected_root = str(artifact_root).lower()
+    if selected_root in {"module", "local", "workspace"}:
+        return MODULE_DIR
+    if selected_root == "scratch":
+        return default_scratch_module_dir()
+    raise ValueError(
+        f"Unsupported Burgers artifact_root '{artifact_root}'. "
+        "Use an absolute path or one of: module, local, workspace, scratch."
+    )
+
+
+def resolve_artifact_path(path, artifact_root=None):
+    if os.path.isabs(path):
+        return path
+    return os.path.join(resolve_artifact_root(artifact_root), path)
+
+
 def resolve_stabilizer_kwargs(config):
     return {
         "macro_limiter": config.get("macro_limiter", "none"),
@@ -67,6 +102,19 @@ def resolve_stabilizer_kwargs(config):
         "macro_range_max": config.get("macro_range_max"),
         "macro_target_mean": config.get("macro_target_mean"),
     }
+
+
+def get_model_config(config):
+    model_config = dict(config.get("model", {}))
+    if "feq_mode" not in model_config:
+        conservative_output = config.get("conservative_output")
+        if conservative_output is None:
+            model_config["feq_mode"] = "positive"
+        else:
+            model_config["feq_mode"] = "projected_positive" if bool(conservative_output) else "positive"
+    model_config["feq_mode"] = str(model_config["feq_mode"]).lower()
+    model_config["logit_clip"] = float(model_config.get("logit_clip", config.get("logit_clip", 15.0)))
+    return model_config
 
 
 def exact_burgers_riemann(x, t, u_left, u_right, x0):
@@ -148,6 +196,7 @@ class BurgersSolver(nn.Module):
         self.dt = self.dx / self.lam
         self.directions, self.weights = self._build_lattice(self.lattice, device, self.dtype)
         self.velocities = self.lam * self.directions.to(dtype=self.dtype)
+        self.basis_vectors = self._build_basis(self.lattice, device, self.dtype)
         self.Qn = int(self.velocities.numel())
         if self.lattice == "D1Q3":
             self.M = torch.tensor(
@@ -187,8 +236,17 @@ class BurgersSolver(nn.Module):
             return directions, weights
         raise ValueError(f"Unsupported Burgers lattice: {lattice}")
 
-    def basis(self):
+    def _build_basis(self, lattice, device, dtype):
+        if lattice == "D2Q9":
+            # Use the full D2Q9 velocity basis so the network can distinguish
+            # cardinal, diagonal, and rest populations that share the same x-velocity.
+            ex = torch.tensor([1.0, 0.0, -1.0, 0.0, 1.0, -1.0, -1.0, 1.0, 0.0], dtype=dtype, device=device)
+            ey = torch.tensor([0.0, 1.0, 0.0, -1.0, 1.0, 1.0, -1.0, -1.0, 0.0], dtype=dtype, device=device)
+            return self.lam * torch.stack([ex, ey], dim=-1)
         return self.velocities.unsqueeze(-1)
+
+    def basis(self):
+        return self.basis_vectors
 
     def x_grid(self):
         return np.linspace(0.0, self.domain_length, self.X, dtype=np.float64)
@@ -442,7 +500,8 @@ def main():
     config_path = resolve_config_path(args.config)
     with open(config_path, "r") as stream:
         config = yaml.safe_load(stream)
-    data_path = resolve_module_path(config["data_dir"])
+    artifact_root = config.get("artifact_root")
+    data_path = resolve_artifact_path(config["data_dir"], artifact_root=artifact_root)
 
     torch_dtype = resolve_torch_dtype(args.dtype)
     numpy_dtype = resolve_numpy_dtype(args.dtype)
@@ -469,6 +528,7 @@ def main():
 
     x = solver.x_grid()
     all_u = []
+    all_F = []
     all_Feq = []
     initial_condition = str(config.get("initial_condition", "riemann")).lower()
     shock_time = None
@@ -488,23 +548,24 @@ def main():
             domain_length=config.get("domain_length", 1.0),
         )
         F = solver.equilibrium(torch.tensor(u0, dtype=torch_dtype, device=solver.device))
+    else:
+        x0 = solver.physical_x0(config["x0"])
+        u0 = exact_burgers_riemann(x, 0.0, config["u_left"], config["u_right"], x0)
+        F = solver.equilibrium(torch.tensor(u0, dtype=torch_dtype, device=solver.device))
+
+    with torch.no_grad():
         for step in range(args.steps):
-            u = solver.macro(F).detach().cpu().numpy().astype(numpy_dtype)
-            feq = solver.equilibrium(torch.tensor(u, dtype=torch_dtype, device=solver.device))
-            all_u.append(u)
+            u_tensor = solver.macro(F)
+            feq = solver.equilibrium(u_tensor)
+            all_u.append(u_tensor.detach().cpu().numpy().astype(numpy_dtype))
+            all_F.append(F.detach().cpu().numpy().astype(numpy_dtype))
             all_Feq.append(feq.detach().cpu().numpy().astype(numpy_dtype))
             if step < args.steps - 1:
                 F, _, _ = solver.step(F, feq)
-    else:
-        x0 = solver.physical_x0(config["x0"])
-        for step in range(args.steps):
-            u = exact_burgers_riemann(x, step * solver.dt, config["u_left"], config["u_right"], x0)
-            all_u.append(u.astype(numpy_dtype))
-            feq = solver.equilibrium(torch.tensor(u, dtype=torch_dtype, device=solver.device))
-            all_Feq.append(feq.cpu().numpy().astype(numpy_dtype))
 
     with h5py.File(data_path, "w") as handle:
         handle.create_dataset("u", data=np.stack(all_u))
+        handle.create_dataset("F", data=np.stack(all_F))
         handle.create_dataset("Feq", data=np.stack(all_Feq))
         handle.attrs["lattice"] = solver.lattice
         handle.attrs["equilibrium_mode"] = solver.equilibrium_mode

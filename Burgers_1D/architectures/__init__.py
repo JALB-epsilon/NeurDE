@@ -1,1 +1,1 @@
-from .model import NeurDE
+from .model import NeurDE, RESIDUAL_MODES

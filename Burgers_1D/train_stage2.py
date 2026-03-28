@@ -7,12 +7,13 @@ import torch
 import torch.nn.functional as F
 import yaml
 
-from architectures import NeurDE
+from architectures import NeurDE, RESIDUAL_MODES
 from burgers_solver import (
     BurgersSolver,
     default_config_path,
     resolve_config_path,
-    resolve_module_path,
+    resolve_artifact_path,
+    get_model_config,
     resolve_stabilizer_kwargs,
     resolve_torch_dtype,
 )
@@ -163,6 +164,15 @@ def resolve_rollout(rollout_schedule, epoch):
     return last_rollout
 
 
+def assert_finite_tensor(tensor, name, epoch, rollout, batch_start=None):
+    if torch.isfinite(tensor).all():
+        return
+    location = f"epoch={epoch}, rollout_stage={rollout}"
+    if batch_start is not None:
+        location += f", batch_start={batch_start}"
+    raise FloatingPointError(f"Non-finite tensor detected for {name} at {location}.")
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", type=str, default=default_config_path())
@@ -183,17 +193,25 @@ def main():
     if "stage2" not in config:
         raise ValueError("Stage-2 config section is required.")
     stage2 = config["stage2"]
+    artifact_root = config.get("artifact_root")
+    model_config = get_model_config(config)
 
-    data_path = resolve_module_path(config["data_dir"])
-    results_dir = resolve_module_path(stage2["results_dir"])
-    pretrained_path = resolve_module_path(stage2["pretrained_path"])
+    data_path = resolve_artifact_path(config["data_dir"], artifact_root=artifact_root)
+    results_dir = resolve_artifact_path(stage2["results_dir"], artifact_root=artifact_root)
+    pretrained_path = resolve_artifact_path(stage2["pretrained_path"], artifact_root=artifact_root)
     os.makedirs(results_dir, exist_ok=True)
 
     with h5py.File(data_path, "r") as handle:
+        if "F" not in handle:
+            raise ValueError(
+                "Burgers stage-2 requires population states saved as dataset 'F'. "
+                "Regenerate the dataset with Burgers_1D/burgers_solver.py."
+            )
         total_steps = handle["u"].shape[0]
         limit = min(int(stage2.get("num_samples", total_steps)), total_steps)
         train_count = args.train_count if args.train_count is not None else int(stage2.get("train_count", limit))
         train_count = max(2, min(int(train_count), limit))
+        all_F = torch.as_tensor(handle["F"][:train_count], dtype=dtype, device=args.device)
         all_u = torch.as_tensor(handle["u"][:train_count], dtype=dtype, device=args.device)
         all_feq = torch.as_tensor(handle["Feq"][:train_count], dtype=dtype, device=args.device)
 
@@ -218,12 +236,12 @@ def main():
     )
     model = NeurDE(
         alpha_layer=[1] + [config["hidden_dim"]] * config["num_layers"],
-        phi_layer=[1] + [config["hidden_dim"]] * config["num_layers"],
+        phi_layer=[solver.basis().shape[-1]] + [config["hidden_dim"]] * config["num_layers"],
         activation="relu",
         learn_feq=True,
         learn_geq=False,
-        logit_clip=config.get("logit_clip", 15.0),
-        conservative_output=config.get("conservative_output", config.get("match_mass", True)),
+        feq_mode=model_config["feq_mode"],
+        logit_clip=model_config["logit_clip"],
     ).to(device=args.device, dtype=dtype)
     model.load_state_dict(torch.load(pretrained_path, map_location=args.device))
     basis = solver.basis().to(device=args.device, dtype=dtype)
@@ -250,7 +268,8 @@ def main():
 
     print(
         f"Stage-2 Burgers fine-tune on {args.device}. train_count={train_count}, "
-        f"epochs={epochs}, pretrained={pretrained_path}, supervision={supervision_mode}"
+        f"epochs={epochs}, pretrained={pretrained_path}, supervision={supervision_mode}, "
+        f"data_path={data_path}, results_dir={results_dir}, feq_mode={model_config['feq_mode']}"
     )
     print(f"Rollout schedule: {rollout_schedule}")
     print(
@@ -264,12 +283,18 @@ def main():
 
     best_loss = float("inf")
     best_path = os.path.join(results_dir, "burgers_stage2_best.pt")
+    best_rollout = None
+    best_rollout_paths = {}
+    previous_rollout = None
 
     x_points = solver.X
     for epoch in range(epochs):
         current_rollout = resolve_rollout(rollout_schedule, epoch)
         if current_rollout <= 0:
             raise ValueError("Rollout schedule must use positive rollout lengths.")
+        if current_rollout != previous_rollout:
+            best_loss = float("inf")
+            previous_rollout = current_rollout
 
         # Burgers stage-2 compares against the next macro state after each step,
         # so a rollout of length N requires snapshots [start, start + N].
@@ -289,13 +314,24 @@ def main():
             batch_starts = starts[start_offset:start_offset + rollout_batch_size]
             batch_start_indices = torch.tensor(batch_starts, device=args.device, dtype=torch.long)
             batch_size = len(batch_starts)
-            F = all_feq[batch_start_indices].clone()
+            F = all_F[batch_start_indices].clone()
             loss = torch.zeros((), device=args.device, dtype=dtype)
             optimizer.zero_grad()
             for step in range(current_rollout):
                 u_current = solver.macro(F)
                 inputs = u_current.unsqueeze(1).unsqueeze(2)
-                feq_pred = model(inputs, basis)
+                model_kwargs = {}
+                if model_config["feq_mode"] in RESIDUAL_MODES:
+                    with torch.no_grad():
+                        model_kwargs["feq_base"] = solver.equilibrium(u_current)
+                feq_pred = model(inputs, basis, **model_kwargs)
+                assert_finite_tensor(
+                    feq_pred,
+                    name="feq_pred",
+                    epoch=epoch,
+                    rollout=current_rollout,
+                    batch_start=batch_starts[0] if batch_starts else None,
+                )
                 feq_pred = reshape_prediction(feq_pred, batch_size, x_points, solver.Qn)
                 if supervision_mode == "feq":
                     target_feq = all_feq[batch_start_indices + step]
@@ -318,20 +354,41 @@ def main():
                             step_loss = step_loss + curvature_weight * local_curvature_increase_penalty(u_next, u_current)
                 loss = loss + step_loss
             loss = loss / float(current_rollout)
+            assert_finite_tensor(
+                loss,
+                name="stage2_loss",
+                epoch=epoch,
+                rollout=current_rollout,
+                batch_start=batch_starts[0] if batch_starts else None,
+            )
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip_norm)
             optimizer.step()
+            for parameter_name, parameter in model.named_parameters():
+                assert_finite_tensor(
+                    parameter,
+                    name=f"parameter:{parameter_name}",
+                    epoch=epoch,
+                    rollout=current_rollout,
+                    batch_start=batch_starts[0] if batch_starts else None,
+                )
             epoch_loss += float(loss.item()) * batch_size
 
         epoch_loss /= max(len(starts), 1)
         print(f"Epoch {epoch}: rollout={current_rollout}, loss={epoch_loss:.6f}")
         if epoch_loss < best_loss:
             best_loss = epoch_loss
+            best_rollout = current_rollout
             torch.save(model.state_dict(), best_path)
+            best_rollout_path = os.path.join(results_dir, f"burgers_stage2_best_rollout{current_rollout}.pt")
+            torch.save(model.state_dict(), best_rollout_path)
+            best_rollout_paths[current_rollout] = best_rollout_path
 
     last_path = os.path.join(results_dir, "burgers_stage2_last.pt")
     torch.save(model.state_dict(), last_path)
-    print(f"Saved best stage-2 model to {best_path}")
+    print(f"Saved best stage-2 model to {best_path} (rollout={best_rollout}, loss={best_loss:.6f})")
+    for rollout, rollout_path in sorted(best_rollout_paths.items()):
+        print(f"Saved rollout-specific best checkpoint to {rollout_path}")
     print(f"Saved last stage-2 model to {last_path}")
 
 
