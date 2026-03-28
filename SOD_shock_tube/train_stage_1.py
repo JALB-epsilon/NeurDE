@@ -43,19 +43,21 @@ if __name__ == "__main__":
     with open("Sod_cases_param_training.yml", 'r') as stream:
         training_config = yaml.safe_load(stream)
     param_training = training_config[args.case]
+    model_config = get_model_config(param_training)
     supervision_mode = str(param_training["stage1"].get("supervision", "geq")).lower()
-    if supervision_mode != "geq":
-        raise ValueError(f"SOD stage1 only supports geq supervision right now, got: {supervision_mode}")
+    if supervision_mode not in {"feq", "geq"}:
+        raise ValueError(f"SOD stage1 only supports feq or geq supervision, got: {supervision_mode}")
 
     os.makedirs(param_training["stage1"]["model_dir"], exist_ok=True) 
 
-    all_rho, all_ux, all_uy, all_T, all_Geq = load_equilibrium_state(param_training["data_dir"])
+    all_rho, all_ux, all_uy, all_T, all_Feq, all_Geq = load_equilibrium_state(param_training["data_dir"])
 
     dataset = SodDataset_stage1(
         all_rho[:args.num_samples],
         all_ux[:args.num_samples],
         all_uy[:args.num_samples],
         all_T[:args.num_samples],
+        all_Feq[:args.num_samples],
         all_Geq[:args.num_samples],
         dtype=dtype,
     )
@@ -64,7 +66,17 @@ if __name__ == "__main__":
     model = NeurDE(
         alpha_layer=[4] + [param_training["hidden_dim"]] * param_training["num_layers"],
         phi_layer=[2] + [param_training["hidden_dim"]] * param_training["num_layers"],
-        activation='relu'
+        activation='relu',
+        learn_feq=supervision_mode == "feq",
+        learn_geq=supervision_mode == "geq",
+        feq_mode=model_config["feq_mode"],
+        geq_mode=model_config["geq_mode"],
+        cv=1.0 / (case_params["vuy"] - 1.0),
+        logit_clip=model_config["logit_clip"],
+        feq_base_measure=model_config["feq_base_measure"],
+        geq_base_measure=model_config["geq_base_measure"],
+        newton_iters=model_config["newton_iters"],
+        newton_tolerance=model_config["newton_tolerance"],
     ).to(device=device, dtype=dtype)
 
 
@@ -103,12 +115,13 @@ if __name__ == "__main__":
     last_epoch_loss = 0.0 
     for epoch in tqdm(range(epochs), desc="Epochs"):
         loss_epoch = 0
-        for rho_batch, ux_batch, uy_batch, T_batch, Geq_batch in dataloader:
+        for rho_batch, ux_batch, uy_batch, T_batch, Feq_batch, Geq_batch in dataloader:
             input_data = torch.stack([rho_batch, ux_batch, uy_batch, T_batch], dim=1).to(device)
-            targets = Geq_batch.permute(0, 2, 3, 1).reshape(-1, 9).to(device)
+            target_batch = Feq_batch if supervision_mode == "feq" else Geq_batch
+            targets = target_batch.permute(0, 2, 3, 1).reshape(-1, 9).to(device)
             optimizer.zero_grad()
-            Geq_pred = model(input_data, basis)
-            loss = loss_func(Geq_pred, targets)
+            equilibrium_pred = model(input_data, basis)
+            loss = loss_func(equilibrium_pred, targets)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()

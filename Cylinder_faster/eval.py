@@ -64,7 +64,10 @@ if __name__ == "__main__":
 
     with open("cylinder_param_training.yml", 'r') as stream:
         param_training = yaml.safe_load(stream)
+    model_config = get_model_config(param_training)
     number_of_rollout = param_training["stage2"]["N"]
+    supervision_mode = str(param_training["stage2"].get("supervision", "geq")).lower()
+    learn_target = resolve_stage_target(param_training["stage2"])
 
     os.makedirs(param_training["stage2"]["model_dir"], exist_ok=True)
     all_F, all_G, all_Feq, all_Geq = load_data_stage_2(param_training["data_dir"])
@@ -72,7 +75,17 @@ if __name__ == "__main__":
     model = NeurDE(
         alpha_layer=[4] + [param_training["hidden_dim"]] * param_training["num_layers"],
         branch_layer=[2] + [param_training["hidden_dim"]] * param_training["num_layers"],
-        activation='relu'
+        activation='relu',
+        learn_feq=learn_target == "feq",
+        learn_geq=learn_target == "geq",
+        feq_mode=model_config["feq_mode"],
+        geq_mode=model_config["geq_mode"],
+        cv=1.0 / (case_params["vuy"] - 1.0),
+        logit_clip=model_config["logit_clip"],
+        feq_base_measure=model_config["feq_base_measure"],
+        geq_base_measure=model_config["geq_base_measure"],
+        newton_iters=model_config["newton_iters"],
+        newton_tolerance=model_config["newton_tolerance"],
     ).to(device=device, dtype=dtype)
 
 
@@ -129,34 +142,53 @@ if __name__ == "__main__":
     Fi0 = torch.as_tensor(all_Fi0[args.init_cond], device=device, dtype=dtype).unsqueeze(0)
     Gi0 = torch.as_tensor(all_Gi0[args.init_cond], device=device, dtype=dtype).unsqueeze(0)
     loss=0
+    khi = None
+    zetax = None
+    zetay = None
     with torch.no_grad():  
             for i in tqdm(range(args.num_samples)):
                 rho, ux, uy, E = cylinder_solver.get_macroscopic(Fi0, Gi0)
                 T = cylinder_solver.get_temp_from_energy(ux, uy, E)
-                Feq = cylinder_solver.get_Feq(rho, ux, uy, T)
                 inputs = torch.stack([rho, ux, uy, T], dim=1)
-                Geq_pred_flat = model(inputs, basis)
+                equilibrium_pred_flat = model(inputs, basis)
    
-                Geq_target = torch.as_tensor(all_Geq[args.init_cond + i], device=device, dtype=dtype).unsqueeze(0)
-
-                inner_lose = loss_func(Geq_pred_flat, Geq_target.permute(0, 2, 3, 1).reshape(-1, cylinder_solver.Qn))
+                if supervision_mode == "feq":
+                    equilibrium_target = torch.as_tensor(all_Feq[args.init_cond + i], device=device, dtype=dtype).unsqueeze(0)
+                else:
+                    equilibrium_target = torch.as_tensor(all_Geq[args.init_cond + i], device=device, dtype=dtype).unsqueeze(0)
+                inner_lose = loss_func(equilibrium_pred_flat, equilibrium_target.permute(0, 2, 3, 1).reshape(-1, cylinder_solver.Qn))
                 loss += inner_lose
-                Geq_pred = Geq_pred_flat.reshape(1, cylinder_solver.Y, cylinder_solver.X, cylinder_solver.Qn).permute(0, 3, 1, 2)
-                Fi0, Gi0 = cylinder_solver.collision(Fi0, Gi0, Feq, Geq_pred, rho, ux, uy, T)
+                equilibrium_pred = equilibrium_pred_flat.reshape(1, cylinder_solver.Y, cylinder_solver.X, cylinder_solver.Qn).permute(0, 3, 1, 2)
+                if learn_target == "geq":
+                    Feq = cylinder_solver.get_Feq(rho, ux, uy, T)
+                    Geq = equilibrium_pred
+                else:
+                    Feq = equilibrium_pred
+                    if khi is None:
+                        khi = torch.zeros_like(ux)
+                        zetax = torch.zeros_like(ux)
+                        zetay = torch.zeros_like(ux)
+                    Geq, khi, zetax, zetay = cylinder_solver.get_Geq_Newton_solver(rho, ux, uy, T, khi, zetax, zetay)
+                Fi0, Gi0 = cylinder_solver.collision(Fi0, Gi0, Feq, Geq, rho, ux, uy, T)
                 Fi, Gi = cylinder_solver.streaming(Fi0, Gi0)
                 if args.with_obs:
-                    khi = torch.zeros_like(ux)
-                    zetax = torch.zeros_like(ux)
-                    zetay = torch.zeros_like(ux)
+                    if khi is None:
+                        khi_bc = torch.zeros_like(ux)
+                        zetax_bc = torch.zeros_like(ux)
+                        zetay_bc = torch.zeros_like(ux)
+                    else:
+                        khi_bc = khi
+                        zetax_bc = zetax
+                        zetay_bc = zetay
 
                     Fi_obs_cyl, Gi_obs_cyl, Fi_obs_Inlet, Gi_obs_Inlet = cylinder_solver.get_obs_distribution(
                                                                                                             rho,
                                                                                                             ux, 
                                                                                                             uy,
                                                                                                             T,
-                                                                                                            khi,
-                                                                                                            zetax,
-                                                                                                            zetay)
+                                                                                                            khi_bc,
+                                                                                                            zetax_bc,
+                                                                                                            zetay_bc)
 
                     Fi_new, Gi_new = cylinder_solver.enforce_Obs_and_BC(Fi,
                                                                         Gi,

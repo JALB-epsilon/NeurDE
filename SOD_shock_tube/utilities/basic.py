@@ -70,8 +70,9 @@ def load_equilibrium_state(file_path):
         all_ux = f["ux"][:]
         all_uy = f["uy"][:]
         all_T = f["T"][:]
+        all_Feq = f["Feq"][:]
         all_Geq = f["Geq"][:]
-        return all_rho, all_ux, all_uy, all_T, all_Geq
+        return all_rho, all_ux, all_uy, all_T, all_Feq, all_Geq
     
 def load_data_stage_2(file_path):
     with h5py.File(file_path, "r") as f:
@@ -144,20 +145,46 @@ def tvd_weight_scheduler(epoch, milestones, weights):
 
     return weights[-1]
 
+
+def get_model_config(config):
+    model_config = dict(config.get("model", {}))
+    return {
+        "feq_mode": str(model_config.get("feq_mode", "positive")).lower(),
+        "geq_mode": str(model_config.get("geq_mode", "positive")).lower(),
+        "feq_base_measure": str(model_config.get("feq_base_measure", "d2q9")).lower(),
+        "geq_base_measure": str(model_config.get("geq_base_measure", "d2q9")).lower(),
+        "logit_clip": model_config.get("logit_clip", 15.0),
+        "newton_iters": int(model_config.get("newton_iters", 20)),
+        "newton_tolerance": float(model_config.get("newton_tolerance", 1e-6)),
+    }
+
+
+def resolve_stage_target(stage_config):
+    supervision = str(stage_config.get("supervision", "geq")).lower()
+    if supervision in {"feq", "geq"}:
+        return supervision
+    if supervision in {"macro", "exact_macro"}:
+        target = str(stage_config.get("learn_target", "geq")).lower()
+        if target not in {"feq", "geq"}:
+            raise ValueError(f"Unsupported learn_target '{target}'.")
+        return target
+    raise ValueError(f"Unsupported supervision mode '{supervision}'.")
+
 class SodDataset_stage1(Dataset):
-    def __init__(self, rho, ux, uy, T, Geq, dtype=torch.float32):
+    def __init__(self, rho, ux, uy, T, Feq, Geq, dtype=torch.float32):
         self.dtype = resolve_torch_dtype(dtype)
         self.rho = torch.as_tensor(rho, dtype=self.dtype)
         self.ux = torch.as_tensor(ux, dtype=self.dtype)
         self.uy = torch.as_tensor(uy, dtype=self.dtype)
         self.T = torch.as_tensor(T, dtype=self.dtype)
+        self.Feq = torch.as_tensor(Feq, dtype=self.dtype)
         self.Geq = torch.as_tensor(Geq, dtype=self.dtype)
 
     def __len__(self):
         return len(self.rho)
 
     def __getitem__(self, idx):
-        return self.rho[idx], self.ux[idx], self.uy[idx], self.T[idx], self.Geq[idx]
+        return self.rho[idx], self.ux[idx], self.uy[idx], self.T[idx], self.Feq[idx], self.Geq[idx]
     
 
 class SodDataset_stage2(Dataset):

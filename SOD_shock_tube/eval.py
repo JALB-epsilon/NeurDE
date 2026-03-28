@@ -64,8 +64,10 @@ if __name__ == "__main__":
     with open("Sod_cases_param_training.yml", 'r') as stream:
         training_config = yaml.safe_load(stream)
     param_training = training_config[args.case]
+    model_config = get_model_config(param_training)
     number_of_rollout = param_training["stage2"]["N"]
     supervision_mode = param_training["stage2"].get("supervision", "geq").lower()
+    learn_target = resolve_stage_target(param_training["stage2"])
 
     os.makedirs(param_training["stage2"]["model_dir"], exist_ok=True)
     all_F, all_G, all_Feq, all_Geq = load_data_stage_2(param_training["data_dir"])
@@ -73,7 +75,17 @@ if __name__ == "__main__":
     model = NeurDE(
         alpha_layer=[4] + [param_training["hidden_dim"]] * param_training["num_layers"],
         phi_layer=[2] + [param_training["hidden_dim"]] * param_training["num_layers"],
-        activation='relu'
+        activation='relu',
+        learn_feq=learn_target == "feq",
+        learn_geq=learn_target == "geq",
+        feq_mode=model_config["feq_mode"],
+        geq_mode=model_config["geq_mode"],
+        cv=1.0 / (case_params["vuy"] - 1.0),
+        logit_clip=model_config["logit_clip"],
+        feq_base_measure=model_config["feq_base_measure"],
+        geq_base_measure=model_config["geq_base_measure"],
+        newton_iters=model_config["newton_iters"],
+        newton_tolerance=model_config["newton_tolerance"],
     ).to(device=device, dtype=dtype)
 
 
@@ -116,7 +128,7 @@ if __name__ == "__main__":
 
     all_P = all_rho * all_T
 
-    use_exact_macro = supervision_mode == "exact_macro" and "exact_left_state" in case_params
+    use_exact_macro = supervision_mode in {"exact_macro", "macro"} and "exact_left_state" in case_params
     if use_exact_macro:
         exact_steps = args.init_cond + args.num_samples + 1
         exact_rho, exact_ux, exact_uy, exact_T = build_exact_macro_rollout(
@@ -138,13 +150,15 @@ if __name__ == "__main__":
     Fi0 = torch.as_tensor(all_Fi0[args.init_cond], device=device, dtype=dtype).unsqueeze(0)
     Gi0 = torch.as_tensor(all_Gi0[args.init_cond], device=device, dtype=dtype).unsqueeze(0)
     loss=0
+    khi = None
+    zetax = None
+    zetay = None
     with torch.no_grad():  
             for i in tqdm(range(args.num_samples)):
                 rho, ux, uy, E = sod_solver.get_macroscopic(Fi0, Gi0)
                 T = sod_solver.get_temp_from_energy(ux, uy, E)
-                Feq = sod_solver.get_Feq(rho, ux, uy, T)
                 inputs = torch.stack([rho, ux, uy, T], dim=1)
-                Geq_pred_flat = model(inputs, basis)
+                equilibrium_pred_flat = model(inputs, basis)
    
                 if use_exact_macro:
                     macro_target = torch.stack(
@@ -158,12 +172,25 @@ if __name__ == "__main__":
                     ).unsqueeze(0)
                     macro_pred = torch.stack([rho, ux, uy, T], dim=1)
                     inner_lose = macro_loss_func(macro_pred, macro_target)
+                elif supervision_mode == "feq":
+                    Feq_target = torch.as_tensor(all_Feq[args.init_cond + i], device=device, dtype=dtype).unsqueeze(0)
+                    inner_lose = loss_func(equilibrium_pred_flat, Feq_target.permute(0, 2, 3, 1).reshape(-1, sod_solver.Qn))
                 else:
                     Geq_target = torch.as_tensor(all_Geq[args.init_cond + i], device=device, dtype=dtype).unsqueeze(0)
-                    inner_lose = loss_func(Geq_pred_flat, Geq_target.permute(0, 2, 3, 1).reshape(-1, sod_solver.Qn))
+                    inner_lose = loss_func(equilibrium_pred_flat, Geq_target.permute(0, 2, 3, 1).reshape(-1, sod_solver.Qn))
                 loss += inner_lose
-                Geq_pred = Geq_pred_flat.reshape(1, sod_solver.Y, sod_solver.X, sod_solver.Qn).permute(0, 3, 1, 2)
-                Fi0, Gi0 = sod_solver.collision(Fi0, Gi0, Feq, Geq_pred, rho, ux, uy, T)
+                equilibrium_pred = equilibrium_pred_flat.reshape(1, sod_solver.Y, sod_solver.X, sod_solver.Qn).permute(0, 3, 1, 2)
+                if learn_target == "geq":
+                    Feq = sod_solver.get_Feq(rho, ux, uy, T)
+                    Geq = equilibrium_pred
+                else:
+                    Feq = equilibrium_pred
+                    if khi is None:
+                        khi = torch.zeros_like(ux)
+                        zetax = torch.zeros_like(ux)
+                        zetay = torch.zeros_like(ux)
+                    Geq, khi, zetax, zetay = sod_solver.get_Geq_Newton_solver(rho, ux, uy, T, khi, zetax, zetay)
+                Fi0, Gi0 = sod_solver.collision(Fi0, Gi0, Feq, Geq, rho, ux, uy, T)
                 Fi0, Gi0 = sod_solver.streaming(Fi0, Gi0)
 
                 rho_plot = rho[0]

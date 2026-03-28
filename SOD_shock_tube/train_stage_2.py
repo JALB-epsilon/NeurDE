@@ -65,10 +65,12 @@ if __name__ == "__main__":
     with open("Sod_cases_param_training.yml", 'r') as stream:
         training_config = yaml.safe_load(stream)
     param_training = training_config[args.case]
+    model_config = get_model_config(param_training)
     number_of_rollout = param_training["stage2"]["N"]
     supervision_mode = param_training["stage2"].get("supervision", "geq").lower()
-    if supervision_mode not in {"geq", "exact_macro"}:
+    if supervision_mode not in {"geq", "feq", "exact_macro", "macro"}:
         raise ValueError(f"Unsupported stage-2 supervision mode: {supervision_mode}")
+    learn_target = resolve_stage_target(param_training["stage2"])
 
     if "TVD" in param_training["stage2"]:
         args.TVD = True
@@ -96,7 +98,7 @@ if __name__ == "__main__":
                                     Geq=all_Geq[args.num_samples:args.num_samples+100],
                                     dtype=dtype,)
 
-    if supervision_mode == "exact_macro":
+    if supervision_mode in {"exact_macro", "macro"}:
         exact_steps = args.num_samples + len(val_dataset) + 1
         exact_rho, exact_ux, exact_uy, exact_T = build_exact_macro_rollout(
             case_params,
@@ -109,7 +111,17 @@ if __name__ == "__main__":
     model = NeurDE(
         alpha_layer=[4] + [param_training["hidden_dim"]] * param_training["num_layers"],
         phi_layer=[2] + [param_training["hidden_dim"]] * param_training["num_layers"],
-        activation='relu'
+        activation='relu',
+        learn_feq=learn_target == "feq",
+        learn_geq=learn_target == "geq",
+        feq_mode=model_config["feq_mode"],
+        geq_mode=model_config["geq_mode"],
+        cv=1.0 / (case_params["vuy"] - 1.0),
+        logit_clip=model_config["logit_clip"],
+        feq_base_measure=model_config["feq_base_measure"],
+        geq_base_measure=model_config["geq_base_measure"],
+        newton_iters=model_config["newton_iters"],
+        newton_tolerance=model_config["newton_tolerance"],
     ).to(device=device, dtype=dtype)
 
     if args.compile:
@@ -157,7 +169,7 @@ if __name__ == "__main__":
 
     print(
         f"Training Case {args.case} on {device}. Epochs: {epochs}, "
-        f"Samples: {args.num_samples}, supervision={supervision_mode}"
+        f"Samples: {args.num_samples}, supervision={supervision_mode}, learn_target={learn_target}"
     )
 
     best_losses = [float('inf')] * 3
@@ -184,6 +196,8 @@ if __name__ == "__main__":
             G_seq = G_seq.to(device=device, dtype=dtype)
             if supervision_mode == "geq":
                 Geq_seq = Geq_seq.to(device=device, dtype=dtype)
+            elif supervision_mode == "feq":
+                Feq_seq = Feq_seq.to(device=device, dtype=dtype)
             batch_size = F_seq.shape[0]
             batch_start_indices = torch.arange(
                 batch_idx * stage2_batch_size,
@@ -198,17 +212,29 @@ if __name__ == "__main__":
                 ux_old = None
                 T_old = None
                 rho_old = None
+            khi = None
+            zetax = None
+            zetay = None
             for rollout in range(number_of_rollout):
                 rho, ux, uy, E = sod_solver.get_macroscopic(Fi0, Gi0)
                 T = sod_solver.get_temp_from_energy(ux, uy, E)
-                Feq = sod_solver.get_Feq(rho, ux, uy, T)
                 inputs = torch.stack([rho, ux, uy, T], dim=1)
-                Geq_pred_flat = model(inputs, basis)
-                Geq_pred = Geq_pred_flat.reshape(batch_size, sod_solver.Y, sod_solver.X, sod_solver.Qn).permute(0, 3, 1, 2)
-                Fi_next, Gi_next = sod_solver.collision(Fi0, Gi0, Feq, Geq_pred, rho, ux, uy, T)
+                equilibrium_pred_flat = model(inputs, basis)
+                equilibrium_pred = equilibrium_pred_flat.reshape(batch_size, sod_solver.Y, sod_solver.X, sod_solver.Qn).permute(0, 3, 1, 2)
+                if learn_target == "geq":
+                    Feq = sod_solver.get_Feq(rho, ux, uy, T)
+                    Geq = equilibrium_pred
+                else:
+                    Feq = equilibrium_pred
+                    if khi is None:
+                        khi = torch.zeros_like(ux)
+                        zetax = torch.zeros_like(ux)
+                        zetay = torch.zeros_like(ux)
+                    Geq, khi, zetax, zetay = sod_solver.get_Geq_Newton_solver(rho, ux, uy, T, khi, zetax, zetay)
+                Fi_next, Gi_next = sod_solver.collision(Fi0, Gi0, Feq, Geq, rho, ux, uy, T)
                 Fi_next, Gi_next = sod_solver.streaming(Fi_next, Gi_next)
 
-                if supervision_mode == "exact_macro":
+                if supervision_mode in {"exact_macro", "macro"}:
                     rho_next, ux_next, uy_next, E_next = sod_solver.get_macroscopic(Fi_next, Gi_next)
                     T_next = sod_solver.get_temp_from_energy(ux_next, uy_next, E_next)
                     target_indices = batch_start_indices + rollout + 1
@@ -223,9 +249,14 @@ if __name__ == "__main__":
                     )
                     pred_macro = torch.stack([rho_next, ux_next, uy_next, T_next], dim=1)
                     total_loss = total_loss + loss_func(pred_macro, target_macro)
+                elif supervision_mode == "feq":
+                    Feq_target = Feq_seq[:, rollout]
+                    pred_batch = equilibrium_pred_flat.reshape(batch_size, sod_solver.Y * sod_solver.X, sod_solver.Qn)
+                    target_batch = Feq_target.permute(0, 2, 3, 1).reshape(batch_size, sod_solver.Y * sod_solver.X, sod_solver.Qn)
+                    total_loss = total_loss + loss_func(pred_batch, target_batch)
                 else:
                     Geq_target = Geq_seq[:, rollout]
-                    pred_batch = Geq_pred_flat.reshape(batch_size, sod_solver.Y * sod_solver.X, sod_solver.Qn)
+                    pred_batch = equilibrium_pred_flat.reshape(batch_size, sod_solver.Y * sod_solver.X, sod_solver.Qn)
                     target_batch = Geq_target.permute(0, 2, 3, 1).reshape(batch_size, sod_solver.Y * sod_solver.X, sod_solver.Qn)
                     total_loss = total_loss + loss_func(pred_batch, target_batch)
 
@@ -259,18 +290,30 @@ if __name__ == "__main__":
         with torch.no_grad():
             Fi0 = next(iter(val_dataset))[0].to(device).unsqueeze(0)
             Gi0 = next(iter(val_dataset))[1].to(device).unsqueeze(0)
+            khi = None
+            zetax = None
+            zetay = None
             
             for val_idx, (F_val, G_val, Feq_val, Geq_val) in enumerate(val_dataset):
                 rho, ux, uy, E = sod_solver.get_macroscopic(Fi0, Gi0)
                 T = sod_solver.get_temp_from_energy(ux, uy, E)
-                Feq = sod_solver.get_Feq(rho, ux, uy, T)
                 inputs = torch.stack([rho, ux, uy, T], dim=1)
-                Geq_pred_flat = model(inputs, basis)
-                Geq_pred = Geq_pred_flat.reshape(1, sod_solver.Y, sod_solver.X, sod_solver.Qn).permute(0, 3, 1, 2)
-                Fi_next, Gi_next = sod_solver.collision(Fi0, Gi0, Feq, Geq_pred, rho, ux, uy, T)
+                equilibrium_pred_flat = model(inputs, basis)
+                equilibrium_pred = equilibrium_pred_flat.reshape(1, sod_solver.Y, sod_solver.X, sod_solver.Qn).permute(0, 3, 1, 2)
+                if learn_target == "geq":
+                    Feq = sod_solver.get_Feq(rho, ux, uy, T)
+                    Geq = equilibrium_pred
+                else:
+                    Feq = equilibrium_pred
+                    if khi is None:
+                        khi = torch.zeros_like(ux)
+                        zetax = torch.zeros_like(ux)
+                        zetay = torch.zeros_like(ux)
+                    Geq, khi, zetax, zetay = sod_solver.get_Geq_Newton_solver(rho, ux, uy, T, khi, zetax, zetay)
+                Fi_next, Gi_next = sod_solver.collision(Fi0, Gi0, Feq, Geq, rho, ux, uy, T)
                 Fi_next, Gi_next = sod_solver.streaming(Fi_next, Gi_next)
 
-                if supervision_mode == "exact_macro":
+                if supervision_mode in {"exact_macro", "macro"}:
                     rho_next, ux_next, uy_next, E_next = sod_solver.get_macroscopic(Fi_next, Gi_next)
                     T_next = sod_solver.get_temp_from_energy(ux_next, uy_next, E_next)
                     target_index = args.num_samples + val_idx + 1
@@ -285,9 +328,14 @@ if __name__ == "__main__":
                     ).unsqueeze(0)
                     pred_macro = torch.stack([rho_next, ux_next, uy_next, T_next], dim=1)
                     val_loss += loss_func(pred_macro, target_macro)
+                elif supervision_mode == "feq":
+                    Feq_target = Feq_val.to(device).unsqueeze(0)
+                    pred_batch = equilibrium_pred_flat.reshape(1, sod_solver.Y * sod_solver.X, sod_solver.Qn)
+                    target_batch = Feq_target.permute(0, 2, 3, 1).reshape(1, sod_solver.Y * sod_solver.X, sod_solver.Qn)
+                    val_loss += loss_func(pred_batch, target_batch)
                 else:
                     Geq_target = Geq_val.to(device).unsqueeze(0)
-                    pred_batch = Geq_pred_flat.reshape(1, sod_solver.Y * sod_solver.X, sod_solver.Qn)
+                    pred_batch = equilibrium_pred_flat.reshape(1, sod_solver.Y * sod_solver.X, sod_solver.Qn)
                     target_batch = Geq_target.permute(0, 2, 3, 1).reshape(1, sod_solver.Y * sod_solver.X, sod_solver.Qn)
                     val_loss += loss_func(pred_batch, target_batch)
 

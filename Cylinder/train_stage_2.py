@@ -56,10 +56,12 @@ if __name__ == "__main__":
 
     with open("cylinder_param_training.yml", 'r') as stream:
         param_training = yaml.safe_load(stream)
+    model_config = get_model_config(param_training)
     number_of_rollout = param_training["stage2"]["N"]
     supervision_mode = str(param_training["stage2"].get("supervision", "geq")).lower()
-    if supervision_mode != "geq":
-        raise ValueError(f"Cylinder stage2 only supports geq supervision right now, got: {supervision_mode}")
+    if supervision_mode not in {"feq", "geq"}:
+        raise ValueError(f"Cylinder stage2 only supports feq or geq supervision right now, got: {supervision_mode}")
+    learn_target = resolve_stage_target(param_training["stage2"])
 
     os.makedirs(param_training["stage2"]["model_dir"], exist_ok=True)
     all_F, all_G, all_Feq, all_Geq = load_data_stage_2(param_training["data_dir"])
@@ -82,7 +84,17 @@ if __name__ == "__main__":
     model = NeurDE(
         alpha_layer=[4] + [param_training["hidden_dim"]] * param_training["num_layers"],
         phi_layer=[2] + [param_training["hidden_dim"]] * param_training["num_layers"],
-        activation='relu'
+        activation='relu',
+        learn_feq=learn_target == "feq",
+        learn_geq=learn_target == "geq",
+        feq_mode=model_config["feq_mode"],
+        geq_mode=model_config["geq_mode"],
+        cv=1.0 / (case_params["vuy"] - 1.0),
+        logit_clip=model_config["logit_clip"],
+        feq_base_measure=model_config["feq_base_measure"],
+        geq_base_measure=model_config["geq_base_measure"],
+        newton_iters=model_config["newton_iters"],
+        newton_tolerance=model_config["newton_tolerance"],
     ).to(device=device, dtype=dtype)
 
     if args.compile:
@@ -133,7 +145,7 @@ if __name__ == "__main__":
 
     print(
         f"Training Case Cylinder on {device}. Epochs: {epochs}, Samples: {args.num_samples}, "
-        f"supervision={supervision_mode}"
+        f"supervision={supervision_mode}, learn_target={learn_target}"
     )
 
     best_losses = [float('inf')] * 3
@@ -151,38 +163,59 @@ if __name__ == "__main__":
             model.train()
             F_seq = F_seq.to(device=device, dtype=dtype)
             G_seq = G_seq.to(device=device, dtype=dtype)
-            Geq_seq = Geq_seq.to(device=device, dtype=dtype)
+            if supervision_mode == "geq":
+                Geq_seq = Geq_seq.to(device=device, dtype=dtype)
+            else:
+                Feq_seq = Feq_seq.to(device=device, dtype=dtype)
             batch_size = F_seq.shape[0]
             Fi0 = F_seq[:, 0, ...]
             Gi0 = G_seq[:, 0, ...]
             total_loss = torch.zeros((), device=device, dtype=dtype)
+            khi = None
+            zetax = None
+            zetay = None
             for rollout in range(number_of_rollout):
                 rho, ux, uy, E = cylinder_solver.get_macroscopic(Fi0, Gi0)
                 T = cylinder_solver.get_temp_from_energy(ux, uy, E)
-                Feq = cylinder_solver.get_Feq(rho, ux, uy, T)
                 inputs = torch.stack([rho, ux, uy, T], dim=1)
-                Geq_pred_flat = model(inputs, basis)
-                Geq_target = Geq_seq[:, rollout]
-                pred_batch = Geq_pred_flat.reshape(batch_size, cylinder_solver.Y * cylinder_solver.X, cylinder_solver.Qn)
-                target_batch = Geq_target.permute(0, 2, 3, 1).reshape(batch_size, cylinder_solver.Y * cylinder_solver.X, cylinder_solver.Qn)
+                equilibrium_pred_flat = model(inputs, basis)
+                equilibrium_pred = equilibrium_pred_flat.reshape(batch_size, cylinder_solver.Y, cylinder_solver.X, cylinder_solver.Qn).permute(0, 3, 1, 2)
+                if learn_target == "geq":
+                    Feq = cylinder_solver.get_Feq(rho, ux, uy, T)
+                    Geq = equilibrium_pred
+                    equilibrium_target = Geq_seq[:, rollout]
+                else:
+                    Feq = equilibrium_pred
+                    if khi is None:
+                        khi = torch.zeros_like(ux)
+                        zetax = torch.zeros_like(ux)
+                        zetay = torch.zeros_like(ux)
+                    Geq, khi, zetax, zetay = cylinder_solver.get_Geq_Newton_solver(rho, ux, uy, T, khi, zetax, zetay)
+                    equilibrium_target = Feq_seq[:, rollout]
+                pred_batch = equilibrium_pred_flat.reshape(batch_size, cylinder_solver.Y * cylinder_solver.X, cylinder_solver.Qn)
+                target_batch = equilibrium_target.permute(0, 2, 3, 1).reshape(batch_size, cylinder_solver.Y * cylinder_solver.X, cylinder_solver.Qn)
                 inner_loss = loss_func(pred_batch, target_batch)
                 total_loss = total_loss + inner_loss
-                Geq_pred = Geq_pred_flat.reshape(batch_size, cylinder_solver.Y, cylinder_solver.X, cylinder_solver.Qn).permute(0, 3, 1, 2)
-                Fi0, Gi0 = cylinder_solver.collision(Fi0, Gi0, Feq, Geq_pred, rho, ux, uy, T)
+                Fi0, Gi0 = cylinder_solver.collision(Fi0, Gi0, Feq, Geq, rho, ux, uy, T)
                 Fi, Gi = cylinder_solver.streaming(Fi0, Gi0)
 
-                khi = torch.zeros_like(ux)
-                zetax = torch.zeros_like(ux)
-                zetay = torch.zeros_like(ux)
+                if khi is None:
+                    khi_bc = torch.zeros_like(ux)
+                    zetax_bc = torch.zeros_like(ux)
+                    zetay_bc = torch.zeros_like(ux)
+                else:
+                    khi_bc = khi
+                    zetax_bc = zetax
+                    zetay_bc = zetay
 
                 Fi_obs_cyl, Gi_obs_cyl, Fi_obs_Inlet, Gi_obs_Inlet = cylinder_solver.get_obs_distribution(
                                             rho,
                                             ux, 
                                             uy,
                                             T,
-                                            khi,
-                                            zetax,
-                                            zetay)
+                                            khi_bc,
+                                            zetax_bc,
+                                            zetay_bc)
 
                 Fi0, Gi0 = cylinder_solver.enforce_Obs_and_BC(Fi,
                                             Gi,
