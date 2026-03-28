@@ -20,6 +20,7 @@ newton_tol: 1.0e-10
 logit_clip: 15.0
 conservative_output: true
 train:
+  supervision: feq
   epochs: 200
   lr: 0.001
   batch_size: 64

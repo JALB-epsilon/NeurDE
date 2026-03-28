@@ -2,6 +2,7 @@ hidden_dim: 32
 num_layers: 4
 data_dir: data_base/cylinder_case.h5
 stage1:
+  supervision: geq
   epochs: 1000
   lr: 1.0e-3
   model_dir: results/stage1
@@ -12,6 +13,7 @@ stage1:
       T_mult: 2
       eta_min: 5.01e-6
 stage2:
+  supervision: geq
   epochs: 1000
   lr: 1.0e-5
   model_dir: results/stage2

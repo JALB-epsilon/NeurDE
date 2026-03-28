@@ -25,12 +25,19 @@ def main():
     data_path = resolve_module_path(config["data_dir"])
     results_dir = resolve_module_path(config["results_dir"])
     conservative_output = config.get("conservative_output", config.get("match_mass", True))
+    supervision_mode = str(config.get("train", {}).get("supervision", "feq")).lower()
+    if supervision_mode not in {"feq", "macro"}:
+        raise ValueError(f"Unsupported LWR train.supervision: {supervision_mode}")
 
     with h5py.File(data_path, "r") as handle:
         u = torch.as_tensor(handle["u"][: args.num_samples], dtype=dtype)
-        feq = torch.as_tensor(handle["Feq"][: args.num_samples], dtype=dtype)
+        feq = None
+        if supervision_mode == "feq":
+            if "Feq" not in handle:
+                raise ValueError("LWR train.supervision='feq' requires Feq in the dataset.")
+            feq = torch.as_tensor(handle["Feq"][: args.num_samples], dtype=dtype)
 
-    dataset = TensorDataset(u, feq)
+    dataset = TensorDataset(u) if feq is None else TensorDataset(u, feq)
     dataloader = DataLoader(dataset, batch_size=config["train"]["batch_size"], shuffle=True)
 
     solver = LWRSolver(
@@ -65,17 +72,25 @@ def main():
     os.makedirs(results_dir, exist_ok=True)
     print(
         f"Training LWR on {u.shape[0]} snapshots "
-        f"(conservative_output={conservative_output}, logit_clip={config.get('logit_clip', 15.0)})"
+        f"(conservative_output={conservative_output}, logit_clip={config.get('logit_clip', 15.0)}, "
+        f"supervision={supervision_mode})"
     )
 
     for epoch in range(config["train"]["epochs"]):
         epoch_loss = 0.0
-        for u_batch, feq_batch in dataloader:
-            inputs = u_batch.unsqueeze(1).unsqueeze(2).to(args.device)
-            targets = feq_batch.permute(0, 2, 1).reshape(-1, solver.Qn).to(args.device)
+        for batch in dataloader:
+            u_batch = batch[0].to(device=args.device, dtype=dtype)
             optimizer.zero_grad()
+            inputs = u_batch.unsqueeze(1).unsqueeze(2)
             feq_pred = model(inputs, basis)
-            loss = torch.norm(feq_pred - targets) / (torch.norm(targets) + 1e-7)
+            if supervision_mode == "feq":
+                feq_batch = batch[1].to(device=args.device, dtype=dtype)
+                targets = feq_batch.permute(0, 2, 1).reshape(-1, solver.Qn)
+                loss = torch.norm(feq_pred - targets) / (torch.norm(targets) + 1e-7)
+            else:
+                feq_pred_pop = feq_pred.reshape(u_batch.shape[0], solver.X, solver.Qn).permute(0, 2, 1)
+                macro_pred = solver.macro(feq_pred_pop)
+                loss = torch.norm(macro_pred - u_batch) / (torch.norm(u_batch) + 1e-7)
             loss.backward()
             optimizer.step()
             epoch_loss += loss.item()

@@ -16,6 +16,7 @@ num_layers: 3
 newton_steps: 50
 newton_tol: 1.0e-10
 train:
+  supervision: feq
   epochs: 200
   lr: 0.001
   batch_size: 64

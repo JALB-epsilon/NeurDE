@@ -31,6 +31,7 @@ macro_range_min: 0.2
 macro_range_max: 1.0
 macro_target_mean: 0.6
 train:
+  supervision: feq
   epochs: 200
   lr: 0.001
   batch_size: 64

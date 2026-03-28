@@ -43,6 +43,9 @@ if __name__ == "__main__":
     with open("Sod_cases_param_training.yml", 'r') as stream:
         training_config = yaml.safe_load(stream)
     param_training = training_config[args.case]
+    supervision_mode = str(param_training["stage1"].get("supervision", "geq")).lower()
+    if supervision_mode != "geq":
+        raise ValueError(f"SOD stage1 only supports geq supervision right now, got: {supervision_mode}")
 
     os.makedirs(param_training["stage1"]["model_dir"], exist_ok=True) 
 
@@ -84,7 +87,10 @@ if __name__ == "__main__":
     epochs = param_training["stage1"]["epochs"]
     loss_func = calculate_relative_error
 
-    print(f"Training Case {args.case} on {device}. Epochs: {epochs}, Samples: {args.num_samples}")
+    print(
+        f"Training Case {args.case} on {device}. Epochs: {epochs}, Samples: {args.num_samples}, "
+        f"supervision={supervision_mode}"
+    )
   
 
 

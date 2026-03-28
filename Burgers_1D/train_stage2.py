@@ -231,6 +231,9 @@ def main():
     optimizer = torch.optim.Adam(model.parameters(), lr=stage2["lr"])
     epochs = args.epochs_override or int(stage2["epochs"])
     rollout_schedule = stage2.get("rollout_schedule", [{"rollout": 1, "epochs": 0}])
+    supervision_mode = str(stage2.get("supervision", "macro")).lower()
+    if supervision_mode not in {"macro", "feq"}:
+        raise ValueError(f"Unsupported Burgers stage2.supervision: {supervision_mode}")
     rollout_batch_size = int(stage2.get("batch_size", config.get("train", {}).get("batch_size", 1)))
     if rollout_batch_size <= 0:
         raise ValueError("stage2.batch_size must be positive.")
@@ -247,7 +250,7 @@ def main():
 
     print(
         f"Stage-2 Burgers fine-tune on {args.device}. train_count={train_count}, "
-        f"epochs={epochs}, pretrained={pretrained_path}"
+        f"epochs={epochs}, pretrained={pretrained_path}, supervision={supervision_mode}"
     )
     print(f"Rollout schedule: {rollout_schedule}")
     print(
@@ -294,19 +297,25 @@ def main():
                 inputs = u_current.unsqueeze(1).unsqueeze(2)
                 feq_pred = model(inputs, basis)
                 feq_pred = reshape_prediction(feq_pred, batch_size, x_points, solver.Qn)
+                if supervision_mode == "feq":
+                    target_feq = all_feq[batch_start_indices + step]
+                    step_loss = relative_error(feq_pred, target_feq)
+                else:
+                    step_loss = None
                 F, _, _ = solver.step(F, feq_pred)
                 u_next = solver.macro(F)
-                target = all_u[batch_start_indices + step + 1]
-                step_loss = mean_burgers_shock_loss(
-                    u_next,
-                    target,
-                    dx=solver.dx,
-                    shock_loss_config=shock_loss_config,
-                )
-                if use_tvd:
-                    step_loss = step_loss + tvd_weight * local_variation_increase_penalty(u_next, u_current)
-                    if curvature_weight > 0.0:
-                        step_loss = step_loss + curvature_weight * local_curvature_increase_penalty(u_next, u_current)
+                if supervision_mode == "macro":
+                    target = all_u[batch_start_indices + step + 1]
+                    step_loss = mean_burgers_shock_loss(
+                        u_next,
+                        target,
+                        dx=solver.dx,
+                        shock_loss_config=shock_loss_config,
+                    )
+                    if use_tvd:
+                        step_loss = step_loss + tvd_weight * local_variation_increase_penalty(u_next, u_current)
+                        if curvature_weight > 0.0:
+                            step_loss = step_loss + curvature_weight * local_curvature_increase_penalty(u_next, u_current)
                 loss = loss + step_loss
             loss = loss / float(current_rollout)
             loss.backward()

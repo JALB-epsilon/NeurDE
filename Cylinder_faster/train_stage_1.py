@@ -40,6 +40,9 @@ if __name__ == "__main__":
 
     with open("cylinder_param_training.yml", 'r') as stream:
         param_training = yaml.safe_load(stream)
+    supervision_mode = str(param_training["stage1"].get("supervision", "geq")).lower()
+    if supervision_mode != "geq":
+        raise ValueError(f"Cylinder_faster stage1 only supports geq supervision right now, got: {supervision_mode}")
 
 
     os.makedirs(param_training["stage1"]["model_dir"], exist_ok=True)
@@ -86,7 +89,10 @@ if __name__ == "__main__":
     epochs = param_training["stage1"]["epochs"]
     loss_func = calculate_relative_error
 
-    print(f"Training Cylinder on {device}. Epochs: {epochs}, Samples: {args.num_samples}")
+    print(
+        f"Training Cylinder on {device}. Epochs: {epochs}, Samples: {args.num_samples}, "
+        f"supervision={supervision_mode}"
+    )
   
 
 
