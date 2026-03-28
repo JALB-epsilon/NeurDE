@@ -58,13 +58,23 @@ def _zero_last_linear(dense_net):
     raise RuntimeError("DenseNet does not contain a linear layer to initialize.")
 
 
-def project_scalar_conservative_mass(population, flat_macro_state):
-    target_moments = flat_macro_state[:, :1]
-    moment_matrix = torch.ones((1, population.shape[-1]), device=population.device, dtype=population.dtype)
+def _project_population_to_moments(population, target_moments, moment_matrix):
     gram_inv = torch.linalg.inv(moment_matrix @ moment_matrix.transpose(0, 1))
     predicted_moments = population @ moment_matrix.transpose(0, 1)
     correction = (target_moments - predicted_moments) @ gram_inv @ moment_matrix
     return population + correction
+
+
+def project_scalar_conservative_mass(population, flat_macro_state):
+    target_moments = flat_macro_state[:, :1]
+    moment_matrix = torch.ones((1, population.shape[-1]), device=population.device, dtype=population.dtype)
+    return _project_population_to_moments(population, target_moments, moment_matrix)
+
+
+def project_burgers_conservative_moments(population, flat_macro_state, basis):
+    target_moments = _burgers_targets(flat_macro_state)
+    moment_matrix = _build_burgers_moment_matrix(basis)
+    return _project_population_to_moments(population, target_moments, moment_matrix)
 
 
 class EquilibriumHead(nn.Module):
@@ -80,11 +90,20 @@ class EquilibriumHead(nn.Module):
         self.alpha = DenseNet(alpha_layer, activation)
         self.phi = DenseNet(trunk_layer, activation)
         self.mode = str(mode).lower()
+        if self.mode in {"moment_projected_positive", "projected_burgers_moments"}:
+            self.mode = "moment_constrained_free"
         self.logit_clip = logit_clip
 
-        if self.mode not in {"positive", "projected_positive", "constrained", "residual", "residual_constrained"}:
+        if self.mode not in {
+            "positive",
+            "projected_positive",
+            "moment_constrained_free",
+            "constrained",
+            "residual",
+            "residual_constrained",
+        }:
             raise ValueError(f"Unsupported Burgers equilibrium head mode: {mode}")
-        if self.mode not in {"positive", "projected_positive"}:
+        if self.mode not in {"positive", "projected_positive", "moment_constrained_free"}:
             _zero_last_linear(self.alpha)
 
     def forward(self, macro_state, basis, base_population=None):
@@ -102,6 +121,10 @@ class EquilibriumHead(nn.Module):
         if self.mode == "projected_positive":
             population = torch.exp(logits)
             return project_scalar_conservative_mass(population, flat_macro_state)
+
+        if self.mode == "moment_constrained_free":
+            population = torch.exp(logits)
+            return project_burgers_conservative_moments(population, flat_macro_state, basis)
 
         if base_population is None:
             raise ValueError(f"Burgers head in mode '{self.mode}' requires a baseline population.")
