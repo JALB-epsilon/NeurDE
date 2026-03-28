@@ -8,6 +8,37 @@ import torch.nn as nn
 import yaml
 
 MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
+_TORCH_DTYPE_MAP = {
+    "float32": torch.float32,
+    "float64": torch.float64,
+}
+_NUMPY_DTYPE_MAP = {
+    "float32": np.float32,
+    "float64": np.float64,
+}
+
+
+def resolve_torch_dtype(dtype):
+    if isinstance(dtype, torch.dtype):
+        if dtype not in _TORCH_DTYPE_MAP.values():
+            raise ValueError(f"Unsupported torch dtype: {dtype}")
+        return dtype
+    dtype_name = str(dtype).lower()
+    if dtype_name not in _TORCH_DTYPE_MAP:
+        raise ValueError(f"Unsupported dtype '{dtype}'. Choose from: {sorted(_TORCH_DTYPE_MAP)}")
+    return _TORCH_DTYPE_MAP[dtype_name]
+
+
+def resolve_numpy_dtype(dtype):
+    if isinstance(dtype, np.dtype):
+        dtype_name = dtype.name
+    elif isinstance(dtype, type) and issubclass(dtype, np.generic):
+        dtype_name = np.dtype(dtype).name
+    else:
+        dtype_name = str(dtype).lower()
+    if dtype_name not in _NUMPY_DTYPE_MAP:
+        raise ValueError(f"Unsupported dtype '{dtype}'. Choose from: {sorted(_NUMPY_DTYPE_MAP)}")
+    return _NUMPY_DTYPE_MAP[dtype_name]
 
 
 def default_config_path():
@@ -36,15 +67,6 @@ def resolve_stabilizer_kwargs(config):
         "macro_range_max": config.get("macro_range_max"),
         "macro_target_mean": config.get("macro_target_mean"),
     }
-
-
-def _stack_batch_results(results):
-    first = results[0]
-    if torch.is_tensor(first):
-        return torch.stack(results, dim=0)
-    if isinstance(first, tuple):
-        return tuple(_stack_batch_results([result[idx] for result in results]) for idx in range(len(first)))
-    raise TypeError(f"Unsupported batch result type: {type(first)!r}")
 
 
 def exact_burgers_riemann(x, t, u_left, u_right, x0):
@@ -99,6 +121,7 @@ class BurgersSolver(nn.Module):
         macro_range_min=None,
         macro_range_max=None,
         macro_target_mean=None,
+        dtype=torch.float32,
     ):
         super().__init__()
         self.X = X
@@ -120,10 +143,11 @@ class BurgersSolver(nn.Module):
         self.macro_range_min = None if macro_range_min is None else float(macro_range_min)
         self.macro_range_max = None if macro_range_max is None else float(macro_range_max)
         self.macro_target_mean = None if macro_target_mean is None else float(macro_target_mean)
+        self.dtype = resolve_torch_dtype(dtype)
         self.dx = self.domain_length / max(self.X - 1, 1)
         self.dt = self.dx / self.lam
-        self.directions, self.weights = self._build_lattice(self.lattice, device)
-        self.velocities = self.lam * self.directions.to(dtype=torch.float32)
+        self.directions, self.weights = self._build_lattice(self.lattice, device, self.dtype)
+        self.velocities = self.lam * self.directions.to(dtype=self.dtype)
         self.Qn = int(self.velocities.numel())
         if self.lattice == "D1Q3":
             self.M = torch.tensor(
@@ -132,7 +156,7 @@ class BurgersSolver(nn.Module):
                     [-self.lam, 0.0, self.lam],
                     [self.lam**2, 0.0, self.lam**2],
                 ],
-                dtype=torch.float32,
+                dtype=self.dtype,
                 device=device,
             )
             self.M_inv = torch.inverse(self.M)
@@ -144,22 +168,22 @@ class BurgersSolver(nn.Module):
             )
 
     @staticmethod
-    def _build_lattice(lattice, device):
+    def _build_lattice(lattice, device, dtype):
         if lattice == "D1Q2":
-            directions = torch.tensor([-1.0, 1.0], dtype=torch.float32, device=device)
-            weights = torch.tensor([0.5, 0.5], dtype=torch.float32, device=device)
+            directions = torch.tensor([-1.0, 1.0], dtype=dtype, device=device)
+            weights = torch.tensor([0.5, 0.5], dtype=dtype, device=device)
             return directions, weights
         if lattice == "D1Q3":
-            directions = torch.tensor([-1.0, 0.0, 1.0], dtype=torch.float32, device=device)
-            weights = torch.tensor([1.0 / 6.0, 2.0 / 3.0, 1.0 / 6.0], dtype=torch.float32, device=device)
+            directions = torch.tensor([-1.0, 0.0, 1.0], dtype=dtype, device=device)
+            weights = torch.tensor([1.0 / 6.0, 2.0 / 3.0, 1.0 / 6.0], dtype=dtype, device=device)
             return directions, weights
         if lattice == "D1Q5":
-            directions = torch.tensor([-2.0, -1.0, 0.0, 1.0, 2.0], dtype=torch.float32, device=device)
-            weights = torch.tensor([1.0, 4.0, 6.0, 4.0, 1.0], dtype=torch.float32, device=device) / 16.0
+            directions = torch.tensor([-2.0, -1.0, 0.0, 1.0, 2.0], dtype=dtype, device=device)
+            weights = torch.tensor([1.0, 4.0, 6.0, 4.0, 1.0], dtype=dtype, device=device) / 16.0
             return directions, weights
         if lattice == "D2Q9":
-            directions = torch.tensor([1.0, 0.0, -1.0, 0.0, 1.0, -1.0, -1.0, 1.0, 0.0], dtype=torch.float32, device=device)
-            weights = torch.tensor([1.0 / 9.0, 1.0 / 9.0, 1.0 / 9.0, 1.0 / 9.0, 1.0 / 36.0, 1.0 / 36.0, 1.0 / 36.0, 1.0 / 36.0, 4.0 / 9.0], dtype=torch.float32, device=device)
+            directions = torch.tensor([1.0, 0.0, -1.0, 0.0, 1.0, -1.0, -1.0, 1.0, 0.0], dtype=dtype, device=device)
+            weights = torch.tensor([1.0 / 9.0, 1.0 / 9.0, 1.0 / 9.0, 1.0 / 9.0, 1.0 / 36.0, 1.0 / 36.0, 1.0 / 36.0, 1.0 / 36.0, 4.0 / 9.0], dtype=dtype, device=device)
             return directions, weights
         raise ValueError(f"Unsupported Burgers lattice: {lattice}")
 
@@ -173,15 +197,14 @@ class BurgersSolver(nn.Module):
         return float(x0) if float(x0) <= self.domain_length else float(x0) * self.dx
 
     def equilibrium_newton(self, u):
-        if u.dim() > 1:
-            return _stack_batch_results([self.equilibrium_newton(u[idx]) for idx in range(u.shape[0])])
         eps = 1e-8
-        target_mass = u.clamp_min(0.0)
+        leading_shape = u.shape[:-1]
+        target_mass = u.clamp_min(0.0).reshape(-1)
         target_flux = 0.5 * target_mass**2
-        equilibrium = torch.zeros((self.Qn, *u.shape), dtype=u.dtype, device=u.device)
+        equilibrium = torch.zeros((self.Qn, target_mass.numel()), dtype=u.dtype, device=u.device)
         active = target_mass > eps
         if not torch.any(active):
-            return equilibrium
+            return equilibrium.transpose(0, 1).reshape(*leading_shape, u.shape[-1], self.Qn).movedim(-1, -2)
 
         active_mass = target_mass[active]
         active_flux = target_flux[active]
@@ -216,11 +239,9 @@ class BurgersSolver(nn.Module):
 
         exponent = logw + alpha[None, :] + beta[None, :] * vel
         equilibrium[:, active] = torch.exp(exponent)
-        return equilibrium
+        return equilibrium.transpose(0, 1).reshape(*leading_shape, u.shape[-1], self.Qn).movedim(-1, -2)
 
     def equilibrium(self, u):
-        if u.dim() > 1:
-            return _stack_batch_results([self.equilibrium(u[idx]) for idx in range(u.shape[0])])
         u = self.stabilize_macro(u)
         if self.lattice == "D1Q3":
             return self.equilibrium_d1q3(u)
@@ -230,55 +251,49 @@ class BurgersSolver(nn.Module):
             flux = 0.5 * u**2
             f_minus = 0.5 * (u - flux / self.lam)
             f_plus = 0.5 * (u + flux / self.lam)
-            return torch.stack([f_minus, f_plus], dim=0)
+            return torch.stack([f_minus, f_plus], dim=-2)
         return self.equilibrium_newton(u)
 
     def equilibrium_d1q3_with_mode(self, u, mode):
-        if u.dim() > 1:
-            return _stack_batch_results([self.equilibrium_d1q3_with_mode(u[idx], mode) for idx in range(u.shape[0])])
         if mode in ("default", "centered"):
             f_plus = 0.5 * self.alpha * u + (u**2) / (4.0 * self.lam)
             f_zero = (1.0 - self.alpha) * u
             f_minus = 0.5 * self.alpha * u - (u**2) / (4.0 * self.lam)
-            return torch.stack([f_minus, f_zero, f_plus], dim=0)
+            return torch.stack([f_minus, f_zero, f_plus], dim=-2)
         if mode == "upwind":
             nonnegative = u >= 0
             f_plus = torch.where(nonnegative, (u**2) / (2.0 * self.lam), torch.zeros_like(u))
             f_zero = torch.where(nonnegative, u - (u**2) / (2.0 * self.lam), u + (u**2) / (2.0 * self.lam))
             f_minus = torch.where(nonnegative, torch.zeros_like(u), -(u**2) / (2.0 * self.lam))
-            return torch.stack([f_minus, f_zero, f_plus], dim=0)
+            return torch.stack([f_minus, f_zero, f_plus], dim=-2)
         raise ValueError(f"Unsupported D1Q3 equilibrium mode: {mode}")
 
     def equilibrium_d1q3(self, u):
-        if u.dim() > 1:
-            return _stack_batch_results([self.equilibrium_d1q3(u[idx]) for idx in range(u.shape[0])])
         return self.equilibrium_d1q3_with_mode(u, self.equilibrium_mode)
 
     def equilibrium_d2q9(self, u):
-        if u.dim() > 1:
-            return _stack_batch_results([self.equilibrium_d2q9(u[idx]) for idx in range(u.shape[0])])
         selected_mode = "upwind" if self.equilibrium_mode == "default" else self.equilibrium_mode
         if selected_mode in ("centered", "upwind"):
             reduced_equilibrium = self.equilibrium_d1q3_with_mode(u, selected_mode)
-            equilibrium = torch.zeros((self.Qn, *u.shape), dtype=u.dtype, device=u.device)
+            equilibrium = torch.zeros((*u.shape[:-1], self.Qn, u.shape[-1]), dtype=u.dtype, device=u.device)
             reduced_by_direction = {
-                -1.0: reduced_equilibrium[0],
-                0.0: reduced_equilibrium[1],
-                1.0: reduced_equilibrium[2],
+                -1.0: reduced_equilibrium[..., 0, :],
+                0.0: reduced_equilibrium[..., 1, :],
+                1.0: reduced_equilibrium[..., 2, :],
             }
             for direction, indices in self.d2q9_direction_groups:
                 group_weights = self.weights[indices].to(dtype=u.dtype, device=u.device)
                 group_total = group_weights.sum()
-                view_shape = (group_weights.shape[0],) + (1,) * u.dim()
-                equilibrium[indices] = (group_weights.view(view_shape) / group_total) * reduced_by_direction[direction].unsqueeze(0)
+                view_shape = (1,) * len(u.shape[:-1]) + (group_weights.shape[0], 1)
+                equilibrium[..., indices, :] = (
+                    group_weights.view(view_shape) / group_total
+                ) * reduced_by_direction[direction].unsqueeze(-2)
             return equilibrium
         if selected_mode in ("newton", "maxent"):
             return self.equilibrium_newton(u)
         raise ValueError(f"Unsupported D2Q9 equilibrium mode: {self.equilibrium_mode}")
 
     def equilibrium_moment_d1q3(self, u):
-        if u.dim() > 1:
-            return _stack_batch_results([self.equilibrium_moment_d1q3(u[idx]) for idx in range(u.shape[0])])
         m1 = u
         m2 = 0.5 * u**2
         if self.equilibrium_mode in ("default", "centered"):
@@ -287,7 +302,7 @@ class BurgersSolver(nn.Module):
             m3 = self.lam * torch.sign(u) * 0.5 * u**2
         else:
             raise ValueError(f"Unsupported D1Q3 equilibrium mode: {self.equilibrium_mode}")
-        return torch.stack([m1, m2, m3], dim=0)
+        return torch.stack([m1, m2, m3], dim=-2)
 
     def macro(self, F):
         return F.sum(dim=-2)
@@ -304,26 +319,17 @@ class BurgersSolver(nn.Module):
         return F - self.omega * (F - Feq)
 
     def collision_d1q3(self, F, Feq=None):
-        if F.dim() > 2:
-            if Feq is None:
-                return _stack_batch_results([self.collision_d1q3(F[idx]) for idx in range(F.shape[0])])
-            return _stack_batch_results([
-                self.collision_d1q3(F[idx], Feq[idx])
-                for idx in range(F.shape[0])
-            ])
         if Feq is None:
             Feq = self.equilibrium(self.macro(F))
-        moments = torch.einsum("ab,bx->ax", self.M, F)
-        moments_eq = torch.einsum("ab,bx->ax", self.M, Feq)
+        moments = torch.einsum("ab,...bx->...ax", self.M, F)
+        moments_eq = torch.einsum("ab,...bx->...ax", self.M, Feq)
         moments_star = moments.clone()
-        moments_star[0] = moments_eq[0]
-        moments_star[1] = moments[1] + self.s2 * (moments_eq[1] - moments[1])
-        moments_star[2] = moments[2] + self.s3 * (moments_eq[2] - moments[2])
-        return torch.einsum("ab,bx->ax", self.M_inv, moments_star)
+        moments_star[..., 0, :] = moments_eq[..., 0, :]
+        moments_star[..., 1, :] = moments[..., 1, :] + self.s2 * (moments_eq[..., 1, :] - moments[..., 1, :])
+        moments_star[..., 2, :] = moments[..., 2, :] + self.s3 * (moments_eq[..., 2, :] - moments[..., 2, :])
+        return torch.einsum("ab,...bx->...ax", self.M_inv, moments_star)
 
     def streaming(self, F):
-        if F.dim() > 2:
-            return _stack_batch_results([self.streaming(F[idx]) for idx in range(F.shape[0])])
         streamed = torch.empty_like(F)
         left_eq = None
         right_eq = None
@@ -332,24 +338,24 @@ class BurgersSolver(nn.Module):
             right_eq = self.boundary_equilibrium(self.u_right_bc, F.dtype)
         for idx, direction in enumerate(self.directions.to(dtype=torch.int64).tolist()):
             if direction == 0:
-                streamed[idx] = F[idx]
+                streamed[..., idx, :] = F[..., idx, :]
                 continue
             shift = abs(int(direction))
             if self.boundary == "periodic":
-                streamed[idx] = torch.roll(F[idx], shifts=direction, dims=0)
+                streamed[..., idx, :] = torch.roll(F[..., idx, :], shifts=direction, dims=-1)
                 continue
             if direction > 0:
-                streamed[idx, shift:] = F[idx, :-shift]
+                streamed[..., idx, shift:] = F[..., idx, :-shift]
                 if self.boundary == "riemann" and left_eq is not None:
-                    streamed[idx, :shift] = left_eq[idx]
+                    streamed[..., idx, :shift] = left_eq[idx]
                 else:
-                    streamed[idx, :shift] = F[idx, 0]
+                    streamed[..., idx, :shift] = F[..., idx, 0].unsqueeze(-1)
             else:
-                streamed[idx, :-shift] = F[idx, shift:]
+                streamed[..., idx, :-shift] = F[..., idx, shift:]
                 if self.boundary == "riemann" and right_eq is not None:
-                    streamed[idx, -shift:] = right_eq[idx]
+                    streamed[..., idx, -shift:] = right_eq[idx]
                 else:
-                    streamed[idx, -shift:] = F[idx, -1]
+                    streamed[..., idx, -shift:] = F[..., idx, -1].unsqueeze(-1)
         return streamed
 
     def step(self, F, Feq=None):
@@ -430,6 +436,7 @@ def main():
     parser.add_argument("--config", type=str, default=default_config_path())
     parser.add_argument("--steps", type=int, default=200)
     parser.add_argument("--device", type=str, default="cpu")
+    parser.add_argument("--dtype", type=str, default="float32", choices=["float32", "float64"])
     args = parser.parse_args()
 
     config_path = resolve_config_path(args.config)
@@ -437,6 +444,8 @@ def main():
         config = yaml.safe_load(stream)
     data_path = resolve_module_path(config["data_dir"])
 
+    torch_dtype = resolve_torch_dtype(args.dtype)
+    numpy_dtype = resolve_numpy_dtype(args.dtype)
     os.makedirs(os.path.dirname(data_path), exist_ok=True)
     solver = BurgersSolver(
         X=config["X"],
@@ -454,6 +463,7 @@ def main():
         boundary=config.get("boundary", "outflow"),
         u_left_bc=config.get("u_left"),
         u_right_bc=config.get("u_right"),
+        dtype=torch_dtype,
         **resolve_stabilizer_kwargs(config),
     )
 
@@ -477,21 +487,21 @@ def main():
             wavenumber=config.get("sine_wavenumber", 1.0),
             domain_length=config.get("domain_length", 1.0),
         )
-        F = solver.equilibrium(torch.tensor(u0, dtype=torch.float32, device=solver.device))
+        F = solver.equilibrium(torch.tensor(u0, dtype=torch_dtype, device=solver.device))
         for step in range(args.steps):
-            u = solver.macro(F).detach().cpu().numpy().astype(np.float32)
-            feq = solver.equilibrium(torch.tensor(u, dtype=torch.float32, device=solver.device))
+            u = solver.macro(F).detach().cpu().numpy().astype(numpy_dtype)
+            feq = solver.equilibrium(torch.tensor(u, dtype=torch_dtype, device=solver.device))
             all_u.append(u)
-            all_Feq.append(feq.detach().cpu().numpy().astype(np.float32))
+            all_Feq.append(feq.detach().cpu().numpy().astype(numpy_dtype))
             if step < args.steps - 1:
                 F, _, _ = solver.step(F, feq)
     else:
         x0 = solver.physical_x0(config["x0"])
         for step in range(args.steps):
             u = exact_burgers_riemann(x, step * solver.dt, config["u_left"], config["u_right"], x0)
-            all_u.append(u.astype(np.float32))
-            feq = solver.equilibrium(torch.tensor(u, dtype=torch.float32, device=solver.device))
-            all_Feq.append(feq.cpu().numpy().astype(np.float32))
+            all_u.append(u.astype(numpy_dtype))
+            feq = solver.equilibrium(torch.tensor(u, dtype=torch_dtype, device=solver.device))
+            all_Feq.append(feq.cpu().numpy().astype(numpy_dtype))
 
     with h5py.File(data_path, "w") as handle:
         handle.create_dataset("u", data=np.stack(all_u))
@@ -503,7 +513,7 @@ def main():
         handle.attrs["dt"] = solver.dt
         handle.attrs["dx"] = solver.dx
         handle.create_dataset("velocities", data=solver.velocities.cpu().numpy())
-        handle.create_dataset("x", data=x.astype(np.float32))
+        handle.create_dataset("x", data=x.astype(numpy_dtype))
         if shock_time is not None and np.isfinite(shock_time):
             handle.attrs["estimated_shock_time"] = float(shock_time)
 

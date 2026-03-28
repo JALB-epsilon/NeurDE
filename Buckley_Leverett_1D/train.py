@@ -7,7 +7,7 @@ import yaml
 from torch.utils.data import DataLoader, TensorDataset
 
 from architectures import NeurDE
-from buckley_leverett_solver import BuckleyLeverettSolver, default_config_path, resolve_config_path, resolve_module_path
+from buckley_leverett_solver import BuckleyLeverettSolver, default_config_path, resolve_config_path, resolve_module_path, resolve_torch_dtype
 
 
 def main():
@@ -15,7 +15,9 @@ def main():
     parser.add_argument("--config", type=str, default=default_config_path())
     parser.add_argument("--device", type=str, default="cpu")
     parser.add_argument("--num_samples", type=int, default=200)
+    parser.add_argument("--dtype", type=str, default="float32", choices=["float32", "float64"])
     args = parser.parse_args()
+    dtype = resolve_torch_dtype(args.dtype)
 
     config_path = resolve_config_path(args.config)
     with open(config_path, "r") as stream:
@@ -25,8 +27,8 @@ def main():
     conservative_output = config.get("conservative_output", config.get("match_mass", True))
 
     with h5py.File(data_path, "r") as handle:
-        u = torch.tensor(handle["u"][: args.num_samples], dtype=torch.float32)
-        feq = torch.tensor(handle["Feq"][: args.num_samples], dtype=torch.float32)
+        u = torch.as_tensor(handle["u"][: args.num_samples], dtype=dtype)
+        feq = torch.as_tensor(handle["Feq"][: args.num_samples], dtype=dtype)
 
     dataset = TensorDataset(u, feq)
     dataloader = DataLoader(dataset, batch_size=config["train"]["batch_size"], shuffle=True)
@@ -44,6 +46,7 @@ def main():
         u_left_bc=config.get("u_left"),
         u_right_bc=config.get("u_right"),
         mobility_ratio=config.get("mobility_ratio", 0.5),
+        dtype=dtype,
     )
 
     model = NeurDE(
@@ -54,9 +57,9 @@ def main():
         learn_geq=False,
         logit_clip=config.get("logit_clip", 15.0),
         conservative_output=conservative_output,
-    ).to(args.device)
+    ).to(device=args.device, dtype=dtype)
 
-    basis = solver.basis().to(args.device)
+    basis = solver.basis().to(device=args.device, dtype=dtype)
     optimizer = torch.optim.Adam(model.parameters(), lr=config["train"]["lr"])
     os.makedirs(results_dir, exist_ok=True)
     print(

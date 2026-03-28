@@ -2,22 +2,13 @@ import torch
 import torch.nn as nn
 import numpy as np
 from src import F_pop_torch, levermore_Geq, levermore_Geq_torch
-from utilities import detach, get_device
+from utilities import detach, get_device, resolve_torch_dtype
 
 
 def _as_solver_tensor(value, dtype, device):
     if torch.is_tensor(value):
         return value.to(device=device, dtype=dtype)
     return torch.as_tensor(value, dtype=dtype, device=device)
-
-
-def _stack_batch_results(results):
-    first = results[0]
-    if torch.is_tensor(first):
-        return torch.stack(results, dim=0)
-    if isinstance(first, tuple):
-        return tuple(_stack_batch_results([result[idx] for result in results]) for idx in range(len(first)))
-    raise TypeError(f"Unsupported batch result type: {type(first)!r}")
 
 
 class SODSolver(nn.Module):
@@ -29,7 +20,8 @@ class SODSolver(nn.Module):
                  muy=0.025,
                  Uax=0.0,
                  Uay=0.0,
-                 device='cuda'):
+                 device='cuda',
+                 dtype=torch.float32):
         super().__init__()
         self.X = X
         self.Y = Y
@@ -42,12 +34,13 @@ class SODSolver(nn.Module):
         self.Uax = Uax 
         self.Uay = Uay
         self.device = device
+        self.dtype = resolve_torch_dtype(dtype)
         ex_values = [1, 0, -1, 0, 1, -1, -1, 1, 0]
         ey_values = [0, 1, 0, -1, 1, 1, -1, -1, 0]
-        self.ex = torch.tensor(ex_values, dtype=torch.float32, device=self.device) + self.Uax
-        self.ey = torch.tensor(ey_values, dtype=torch.float32, device=self.device) + self.Uay
-        self.ex1 = torch.tensor(ex_values, dtype=torch.float32, device=self.device)
-        self.ey1 = torch.tensor(ey_values, dtype=torch.float32, device=self.device)
+        self.ex = torch.tensor(ex_values, dtype=self.dtype, device=self.device) + self.Uax
+        self.ey = torch.tensor(ey_values, dtype=self.dtype, device=self.device) + self.Uay
+        self.ex1 = torch.tensor(ex_values, dtype=self.dtype, device=self.device)
+        self.ey1 = torch.tensor(ey_values, dtype=self.dtype, device=self.device)
         del ex_values, ey_values
         self.Lx = self.X // 2
         self.get_derived_quantities()
@@ -137,9 +130,9 @@ class SODSolver(nn.Module):
         pop_dim = 1 if F.dim() == 4 else 0
         EPS = diff.mean(dim=pop_dim)
         alpha = torch.ones_like(EPS)
-        alpha = torch.where(EPS < 0.01, torch.tensor(1.0, device=EPS.device), alpha)
-        alpha = torch.where(EPS < 0.1, torch.tensor(self.alpha01, device=EPS.device), alpha)
-        alpha = torch.where(EPS < 1, torch.tensor(self.alpha1, device=EPS.device), alpha)
+        alpha = torch.where(EPS < 0.01, EPS.new_tensor(1.0), alpha)
+        alpha = torch.where(EPS < 0.1, EPS.new_tensor(self.alpha01), alpha)
+        alpha = torch.where(EPS < 1, EPS.new_tensor(self.alpha1), alpha)
         alpha = torch.where(EPS >= 1, 1 / tau_DL, alpha)  
         tau_EPS = alpha * tau_DL
         if F.dim() == 4:
@@ -152,28 +145,10 @@ class SODSolver(nn.Module):
         return omega, omegaT
     
     def get_Feq(self, rho, ux, uy, T):
-        if rho.dim() == 3:
-            return _stack_batch_results([
-                self.get_Feq(rho[idx], ux[idx], uy[idx], T[idx])
-                for idx in range(rho.shape[0])
-            ])
         Feq = F_pop_torch.compute_Feq(rho, ux, self.Uax, uy, self.Uay, T, Q=self.Qn)
         return Feq
     
     def get_Geq_Newton_solver(self, rho, ux, uy, T, khi, zetax, zetay):
-        if rho.dim() == 3:
-            return _stack_batch_results([
-                self.get_Geq_Newton_solver(
-                    rho[idx],
-                    ux[idx],
-                    uy[idx],
-                    T[idx],
-                    khi[idx],
-                    zetax[idx],
-                    zetay[idx],
-                )
-                for idx in range(rho.shape[0])
-            ])
         dtype = rho.dtype
         khi = _as_solver_tensor(khi, dtype, self.device)
         zetax = _as_solver_tensor(zetax, dtype, self.device)
@@ -254,20 +229,6 @@ class SODSolver(nn.Module):
         return Fo1, Go1
                
     def collision(self, F, G, Feq, Geq, rho, ux, uy, T ):
-        if F.dim() == 4:
-            return _stack_batch_results([
-                self.collision(
-                    F[idx],
-                    G[idx],
-                    Feq[idx],
-                    Geq[idx],
-                    rho[idx],
-                    ux[idx],
-                    uy[idx],
-                    T[idx],
-                )
-                for idx in range(F.shape[0])
-            ])
         omega, omegaT = self.get_relaxation_time(rho, T, F, Feq)
         Gis = self.from_macro_to_lattice_Gis(F, rho, ux, uy, T)
         F_pos_collision = F - omega * (F - Feq)
@@ -277,28 +238,28 @@ class SODSolver(nn.Module):
     
     def shift_operator(self, F, G):
         if F.dim() == 4:
-            return _stack_batch_results([
-                self.shift_operator(F[idx], G[idx])
-                for idx in range(F.shape[0])
-            ])
+            Fi = F[:, self.q_indices, self.Y_indices, self.X_indices]
+            Gi = G[:, self.q_indices, self.Y_indices, self.X_indices]
+            return Fi, Gi
         Fi = F[self.q_indices, self.Y_indices, self.X_indices]
         Gi = G[self.q_indices, self.Y_indices, self.X_indices]       
         return Fi, Gi
     
     def streaming(self, F_pos_coll, G_pos_coll):
-        if F_pos_coll.dim() == 4:
-            return _stack_batch_results([
-                self.streaming(F_pos_coll[idx], G_pos_coll[idx])
-                for idx in range(F_pos_coll.shape[0])
-            ])
         Fo1, Go1 = self.interpolate_domain(F_pos_coll, G_pos_coll)
         Fi, Gi = self.shift_operator(Fo1, Go1)      
         # boundary conditions
         coly = torch.arange(1, self.Y + 1, device=self.device) - 1
-        Gi[:, coly, 0] = Gi[:, coly, 1]
-        Gi[:, coly, self.X - 1] = Gi[:, coly, self.X - 2]
-        Fi[:, coly, 0] = Fi[:, coly, 1]
-        Fi[:, coly, self.X - 1] = Fi[:, coly, self.X - 2]
+        if Fi.dim() == 4:
+            Gi[:, :, coly, 0] = Gi[:, :, coly, 1]
+            Gi[:, :, coly, self.X - 1] = Gi[:, :, coly, self.X - 2]
+            Fi[:, :, coly, 0] = Fi[:, :, coly, 1]
+            Fi[:, :, coly, self.X - 1] = Fi[:, :, coly, self.X - 2]
+        else:
+            Gi[:, coly, 0] = Gi[:, coly, 1]
+            Gi[:, coly, self.X - 1] = Gi[:, coly, self.X - 2]
+            Fi[:, coly, 0] = Fi[:, coly, 1]
+            Fi[:, coly, self.X - 1] = Fi[:, coly, self.X - 2]
         del Fo1, Go1
         return Fi, Gi
     
@@ -362,11 +323,13 @@ def main():
     parser.add_argument('--case', type=int, choices=[1, 2], help='Choose case 1 or 2', default=1)
     parser.add_argument("--plot", dest='plot', action='store_true', help='Plot the results', default=False)
     parser.add_argument("--compile", dest='compile', action='store_true', help='Compile the functions', default=False)
+    parser.add_argument("--dtype", type=str, default="float32", choices=["float32", "float64"])
     parser.set_defaults(save=True)
 
 
     args = parser.parse_args()
     device = get_device(args.device)
+    dtype = resolve_torch_dtype(args.dtype)
 
     with open("Sod_cases_param.yml", 'r') as f: 
         cases = yaml.load(f, Loader=yaml.FullLoader)    
@@ -387,7 +350,8 @@ def main():
                             muy=case_params['muy'], 
                             Uax=case_params['Uax'], 
                             Uay=case_params['Uay'],
-                            device=case_params['device']
+                            device=case_params['device'],
+                            dtype=dtype,
                             )  
     
 

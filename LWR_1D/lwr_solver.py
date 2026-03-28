@@ -8,6 +8,37 @@ import torch.nn as nn
 import yaml
 
 MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
+_TORCH_DTYPE_MAP = {
+    "float32": torch.float32,
+    "float64": torch.float64,
+}
+_NUMPY_DTYPE_MAP = {
+    "float32": np.float32,
+    "float64": np.float64,
+}
+
+
+def resolve_torch_dtype(dtype):
+    if isinstance(dtype, torch.dtype):
+        if dtype not in _TORCH_DTYPE_MAP.values():
+            raise ValueError(f"Unsupported torch dtype: {dtype}")
+        return dtype
+    dtype_name = str(dtype).lower()
+    if dtype_name not in _TORCH_DTYPE_MAP:
+        raise ValueError(f"Unsupported dtype '{dtype}'. Choose from: {sorted(_TORCH_DTYPE_MAP)}")
+    return _TORCH_DTYPE_MAP[dtype_name]
+
+
+def resolve_numpy_dtype(dtype):
+    if isinstance(dtype, np.dtype):
+        dtype_name = dtype.name
+    elif isinstance(dtype, type) and issubclass(dtype, np.generic):
+        dtype_name = np.dtype(dtype).name
+    else:
+        dtype_name = str(dtype).lower()
+    if dtype_name not in _NUMPY_DTYPE_MAP:
+        raise ValueError(f"Unsupported dtype '{dtype}'. Choose from: {sorted(_NUMPY_DTYPE_MAP)}")
+    return _NUMPY_DTYPE_MAP[dtype_name]
 
 
 def default_config_path():
@@ -27,15 +58,6 @@ def resolve_module_path(path):
     if os.path.isabs(path):
         return path
     return os.path.join(MODULE_DIR, path)
-
-
-def _stack_batch_results(results):
-    first = results[0]
-    if torch.is_tensor(first):
-        return torch.stack(results, dim=0)
-    if isinstance(first, tuple):
-        return tuple(_stack_batch_results([result[idx] for result in results]) for idx in range(len(first)))
-    raise TypeError(f"Unsupported batch result type: {type(first)!r}")
 
 
 def initial_riemann(x, rho_left, rho_right, x0):
@@ -88,6 +110,7 @@ class LWRSolver(nn.Module):
         rho_right_bc=None,
         rho_max=1.0,
         v_free=1.0,
+        dtype=torch.float32,
     ):
         super().__init__()
         self.X = X
@@ -103,25 +126,26 @@ class LWRSolver(nn.Module):
         self.rho_right_bc = rho_right_bc
         self.rho_max = rho_max
         self.v_free = v_free
+        self.dtype = resolve_torch_dtype(dtype)
         self.dx = self.domain_length / max(self.X - 1, 1)
         self.dt = self.dx / self.lam
-        self.directions, self.weights = self._build_lattice(self.lattice, device)
-        self.velocities = self.lam * self.directions.to(dtype=torch.float32)
+        self.directions, self.weights = self._build_lattice(self.lattice, device, self.dtype)
+        self.velocities = self.lam * self.directions.to(dtype=self.dtype)
         self.Qn = int(self.velocities.numel())
 
     @staticmethod
-    def _build_lattice(lattice, device):
+    def _build_lattice(lattice, device, dtype):
         if lattice == "D1Q2":
-            directions = torch.tensor([-1.0, 1.0], dtype=torch.float32, device=device)
-            weights = torch.tensor([0.5, 0.5], dtype=torch.float32, device=device)
+            directions = torch.tensor([-1.0, 1.0], dtype=dtype, device=device)
+            weights = torch.tensor([0.5, 0.5], dtype=dtype, device=device)
             return directions, weights
         if lattice == "D1Q5":
-            directions = torch.tensor([-2.0, -1.0, 0.0, 1.0, 2.0], dtype=torch.float32, device=device)
-            weights = torch.tensor([1.0, 4.0, 6.0, 4.0, 1.0], dtype=torch.float32, device=device) / 16.0
+            directions = torch.tensor([-2.0, -1.0, 0.0, 1.0, 2.0], dtype=dtype, device=device)
+            weights = torch.tensor([1.0, 4.0, 6.0, 4.0, 1.0], dtype=dtype, device=device) / 16.0
             return directions, weights
         if lattice == "D2Q9":
-            directions = torch.tensor([1.0, 0.0, -1.0, 0.0, 1.0, -1.0, -1.0, 1.0, 0.0], dtype=torch.float32, device=device)
-            weights = torch.tensor([1.0 / 9.0, 1.0 / 9.0, 1.0 / 9.0, 1.0 / 9.0, 1.0 / 36.0, 1.0 / 36.0, 1.0 / 36.0, 1.0 / 36.0, 4.0 / 9.0], dtype=torch.float32, device=device)
+            directions = torch.tensor([1.0, 0.0, -1.0, 0.0, 1.0, -1.0, -1.0, 1.0, 0.0], dtype=dtype, device=device)
+            weights = torch.tensor([1.0 / 9.0, 1.0 / 9.0, 1.0 / 9.0, 1.0 / 9.0, 1.0 / 36.0, 1.0 / 36.0, 1.0 / 36.0, 1.0 / 36.0, 4.0 / 9.0], dtype=dtype, device=device)
             return directions, weights
         raise ValueError(f"Unsupported LWR lattice: {lattice}")
 
@@ -138,15 +162,14 @@ class LWRSolver(nn.Module):
         return self.v_free * rho * (1.0 - rho / self.rho_max)
 
     def equilibrium_newton(self, rho):
-        if rho.dim() > 1:
-            return _stack_batch_results([self.equilibrium_newton(rho[idx]) for idx in range(rho.shape[0])])
         eps = 1e-8
-        target_mass = rho.clamp(0.0, self.rho_max)
+        leading_shape = rho.shape[:-1]
+        target_mass = rho.clamp(0.0, self.rho_max).reshape(-1)
         target_flux = self.flux(target_mass)
-        equilibrium = torch.zeros((self.Qn, *rho.shape), dtype=rho.dtype, device=rho.device)
+        equilibrium = torch.zeros((self.Qn, target_mass.numel()), dtype=rho.dtype, device=rho.device)
         active = target_mass > eps
         if not torch.any(active):
-            return equilibrium
+            return equilibrium.transpose(0, 1).reshape(*leading_shape, rho.shape[-1], self.Qn).movedim(-1, -2)
 
         active_mass = target_mass[active]
         active_flux = target_flux[active]
@@ -177,16 +200,14 @@ class LWRSolver(nn.Module):
 
         exponent = logw + alpha[None, :] + beta[None, :] * vel
         equilibrium[:, active] = torch.exp(exponent)
-        return equilibrium
+        return equilibrium.transpose(0, 1).reshape(*leading_shape, rho.shape[-1], self.Qn).movedim(-1, -2)
 
     def equilibrium(self, rho):
-        if rho.dim() > 1:
-            return _stack_batch_results([self.equilibrium(rho[idx]) for idx in range(rho.shape[0])])
         if self.lattice == "D1Q2":
             flux = self.flux(rho)
             f_minus = 0.5 * (rho - flux / self.lam)
             f_plus = 0.5 * (rho + flux / self.lam)
-            return torch.stack([f_minus, f_plus], dim=0)
+            return torch.stack([f_minus, f_plus], dim=-2)
         return self.equilibrium_newton(rho)
 
     def macro(self, F):
@@ -202,8 +223,6 @@ class LWRSolver(nn.Module):
         return F - self.omega * (F - Feq)
 
     def streaming(self, F):
-        if F.dim() > 2:
-            return _stack_batch_results([self.streaming(F[idx]) for idx in range(F.shape[0])])
         streamed = torch.empty_like(F)
         left_eq = None
         right_eq = None
@@ -212,18 +231,24 @@ class LWRSolver(nn.Module):
             right_eq = self.boundary_equilibrium(self.rho_right_bc, F.dtype)
         for idx, direction in enumerate(self.directions.to(dtype=torch.int64).tolist()):
             if direction == 0:
-                streamed[idx] = F[idx]
+                streamed[..., idx, :] = F[..., idx, :]
                 continue
             shift = abs(int(direction))
             if self.boundary == "periodic":
-                streamed[idx] = torch.roll(F[idx], shifts=direction, dims=0)
+                streamed[..., idx, :] = torch.roll(F[..., idx, :], shifts=direction, dims=-1)
                 continue
             if direction > 0:
-                streamed[idx, shift:] = F[idx, :-shift]
-                streamed[idx, :shift] = left_eq[idx] if self.boundary == "riemann" and left_eq is not None else F[idx, 0]
+                streamed[..., idx, shift:] = F[..., idx, :-shift]
+                if self.boundary == "riemann" and left_eq is not None:
+                    streamed[..., idx, :shift] = left_eq[idx]
+                else:
+                    streamed[..., idx, :shift] = F[..., idx, 0].unsqueeze(-1)
             else:
-                streamed[idx, :-shift] = F[idx, shift:]
-                streamed[idx, -shift:] = right_eq[idx] if self.boundary == "riemann" and right_eq is not None else F[idx, -1]
+                streamed[..., idx, :-shift] = F[..., idx, shift:]
+                if self.boundary == "riemann" and right_eq is not None:
+                    streamed[..., idx, -shift:] = right_eq[idx]
+                else:
+                    streamed[..., idx, -shift:] = F[..., idx, -1].unsqueeze(-1)
         return streamed
 
     def step(self, F, Feq=None):
@@ -239,6 +264,7 @@ def main():
     parser.add_argument("--config", type=str, default=default_config_path())
     parser.add_argument("--steps", type=int, default=200)
     parser.add_argument("--device", type=str, default="cpu")
+    parser.add_argument("--dtype", type=str, default="float32", choices=["float32", "float64"])
     args = parser.parse_args()
 
     config_path = resolve_config_path(args.config)
@@ -247,6 +273,8 @@ def main():
     data_path = resolve_module_path(config["data_dir"])
     os.makedirs(os.path.dirname(data_path), exist_ok=True)
 
+    torch_dtype = resolve_torch_dtype(args.dtype)
+    numpy_dtype = resolve_numpy_dtype(args.dtype)
     solver = LWRSolver(
         X=config["X"],
         lam=config["lam"],
@@ -261,6 +289,7 @@ def main():
         rho_right_bc=config.get("rho_right"),
         rho_max=config.get("rho_max", 1.0),
         v_free=config.get("v_free", 1.0),
+        dtype=torch_dtype,
     )
 
     x = solver.x_grid()
@@ -277,9 +306,9 @@ def main():
             rho_max=config.get("rho_max", 1.0),
             v_free=config.get("v_free", 1.0),
         )
-        all_rho.append(rho.astype(np.float32))
-        feq = solver.equilibrium(torch.tensor(rho, dtype=torch.float32, device=solver.device))
-        all_Feq.append(feq.cpu().numpy().astype(np.float32))
+        all_rho.append(rho.astype(numpy_dtype))
+        feq = solver.equilibrium(torch.tensor(rho, dtype=torch_dtype, device=solver.device))
+        all_Feq.append(feq.cpu().numpy().astype(numpy_dtype))
 
     with h5py.File(data_path, "w") as handle:
         handle.create_dataset("u", data=np.stack(all_rho))

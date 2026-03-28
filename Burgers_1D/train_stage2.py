@@ -8,11 +8,18 @@ import torch.nn.functional as F
 import yaml
 
 from architectures import NeurDE
-from burgers_solver import BurgersSolver, default_config_path, resolve_config_path, resolve_module_path, resolve_stabilizer_kwargs
+from burgers_solver import (
+    BurgersSolver,
+    default_config_path,
+    resolve_config_path,
+    resolve_module_path,
+    resolve_stabilizer_kwargs,
+    resolve_torch_dtype,
+)
 
 
-def reshape_prediction(prediction, x_points, qn):
-    return prediction.reshape(1, x_points, qn).permute(0, 2, 1).squeeze(0)
+def reshape_prediction(prediction, batch_size, x_points, qn):
+    return prediction.reshape(batch_size, x_points, qn).permute(0, 2, 1)
 
 
 def relative_error(prediction, target, eps=1.0e-7):
@@ -125,6 +132,20 @@ def compute_burgers_shock_loss(u_pred, target, dx, shock_loss_config=None):
     return loss
 
 
+def mean_burgers_shock_loss(u_pred, target, dx, shock_loss_config=None):
+    if u_pred.dim() <= 1:
+        return compute_burgers_shock_loss(u_pred, target, dx=dx, shock_loss_config=shock_loss_config)
+    return torch.stack([
+        compute_burgers_shock_loss(
+            u_pred[idx],
+            target[idx],
+            dx=dx,
+            shock_loss_config=shock_loss_config,
+        )
+        for idx in range(u_pred.shape[0])
+    ]).mean()
+
+
 def resolve_rollout(rollout_schedule, epoch):
     if not rollout_schedule:
         return 1
@@ -149,7 +170,9 @@ def main():
     parser.add_argument("--epochs_override", type=int, default=None)
     parser.add_argument("--train_count", type=int, default=None)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--dtype", type=str, default="float32", choices=["float32", "float64"])
     args = parser.parse_args()
+    dtype = resolve_torch_dtype(args.dtype)
 
     torch.manual_seed(args.seed)
     random.seed(args.seed)
@@ -171,8 +194,8 @@ def main():
         limit = min(int(stage2.get("num_samples", total_steps)), total_steps)
         train_count = args.train_count if args.train_count is not None else int(stage2.get("train_count", limit))
         train_count = max(2, min(int(train_count), limit))
-        all_u = torch.tensor(handle["u"][:train_count], dtype=torch.float32, device=args.device)
-        all_feq = torch.tensor(handle["Feq"][:train_count], dtype=torch.float32, device=args.device)
+        all_u = torch.as_tensor(handle["u"][:train_count], dtype=dtype, device=args.device)
+        all_feq = torch.as_tensor(handle["Feq"][:train_count], dtype=dtype, device=args.device)
 
     solver = BurgersSolver(
         X=config["X"],
@@ -190,6 +213,7 @@ def main():
         boundary=config.get("boundary", "outflow"),
         u_left_bc=config.get("u_left"),
         u_right_bc=config.get("u_right"),
+        dtype=dtype,
         **resolve_stabilizer_kwargs(config),
     )
     model = NeurDE(
@@ -200,13 +224,16 @@ def main():
         learn_geq=False,
         logit_clip=config.get("logit_clip", 15.0),
         conservative_output=config.get("conservative_output", config.get("match_mass", True)),
-    ).to(args.device)
+    ).to(device=args.device, dtype=dtype)
     model.load_state_dict(torch.load(pretrained_path, map_location=args.device))
-    basis = solver.basis().to(args.device)
+    basis = solver.basis().to(device=args.device, dtype=dtype)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=stage2["lr"])
     epochs = args.epochs_override or int(stage2["epochs"])
     rollout_schedule = stage2.get("rollout_schedule", [{"rollout": 1, "epochs": 0}])
+    rollout_batch_size = int(stage2.get("batch_size", config.get("train", {}).get("batch_size", 1)))
+    if rollout_batch_size <= 0:
+        raise ValueError("stage2.batch_size must be positive.")
     grad_clip_norm = float(stage2.get("grad_clip_norm", 1.0))
     use_tvd = bool(stage2.get("TVD", stage2.get("use_tvd", False)))
     tvd_weight = float(stage2.get("tvd_weight", 0.0))
@@ -238,6 +265,11 @@ def main():
     x_points = solver.X
     for epoch in range(epochs):
         current_rollout = resolve_rollout(rollout_schedule, epoch)
+        if current_rollout <= 0:
+            raise ValueError("Rollout schedule must use positive rollout lengths.")
+
+        # Burgers stage-2 compares against the next macro state after each step,
+        # so a rollout of length N requires snapshots [start, start + N].
         max_start = train_count - current_rollout - 1
         if max_start < 0:
             raise ValueError(
@@ -250,19 +282,22 @@ def main():
 
         epoch_loss = 0.0
         model.train()
-        for start in starts:
-            F = all_feq[start].clone()
-            loss = torch.zeros((), device=args.device)
+        for start_offset in range(0, len(starts), rollout_batch_size):
+            batch_starts = starts[start_offset:start_offset + rollout_batch_size]
+            batch_start_indices = torch.tensor(batch_starts, device=args.device, dtype=torch.long)
+            batch_size = len(batch_starts)
+            F = all_feq[batch_start_indices].clone()
+            loss = torch.zeros((), device=args.device, dtype=dtype)
             optimizer.zero_grad()
             for step in range(current_rollout):
                 u_current = solver.macro(F)
-                inputs = u_current.unsqueeze(0).unsqueeze(0).unsqueeze(1)
+                inputs = u_current.unsqueeze(1).unsqueeze(2)
                 feq_pred = model(inputs, basis)
-                feq_pred = reshape_prediction(feq_pred, x_points, solver.Qn)
+                feq_pred = reshape_prediction(feq_pred, batch_size, x_points, solver.Qn)
                 F, _, _ = solver.step(F, feq_pred)
                 u_next = solver.macro(F)
-                target = all_u[start + step + 1]
-                step_loss = compute_burgers_shock_loss(
+                target = all_u[batch_start_indices + step + 1]
+                step_loss = mean_burgers_shock_loss(
                     u_next,
                     target,
                     dx=solver.dx,
@@ -277,7 +312,7 @@ def main():
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip_norm)
             optimizer.step()
-            epoch_loss += float(loss.item())
+            epoch_loss += float(loss.item()) * batch_size
 
         epoch_loss /= max(len(starts), 1)
         print(f"Epoch {epoch}: rollout={current_rollout}, loss={epoch_loss:.6f}")

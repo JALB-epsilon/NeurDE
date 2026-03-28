@@ -23,16 +23,19 @@ if __name__ == "__main__":
     parser.add_argument("--save_frequency", default=50, help='Save model')
     parser.add_argument("--with_obs", action='store_true', help='With obstacle')
     parser.add_argument("--trained_path", type=str, default=None)
+    parser.add_argument("--dtype", type=str, default="float32", choices=["float32", "float64"])
     parser.set_defaults(save_model=True)
     parser.set_defaults(with_obs=True) # Ensure default is without_obs
 
     args = parser.parse_args()
 
     device = get_device(args.device)
+    dtype = resolve_torch_dtype(args.dtype)
 
     
-    args.trained_path = args.trained_path.replace("SOD_shock_tube/", "")
-    print(args.trained_path)
+    if args.trained_path:
+        args.trained_path = args.trained_path.replace("Cylinder/", "")
+        print(args.trained_path)
 
 
     with open("cylinder_param.yml", 'r') as stream:
@@ -55,7 +58,8 @@ if __name__ == "__main__":
                                     vuy=case_params['vuy'],
                                     Pr=case_params['Pr'],
                                     Ns=case_params['Ns'],
-                                    device=device
+                                    device=device,
+                                    dtype=dtype,
                                     )
 
     with open("cylinder_param_training.yml", 'r') as stream:
@@ -69,7 +73,7 @@ if __name__ == "__main__":
         alpha_layer=[4] + [param_training["hidden_dim"]] * param_training["num_layers"],
         phi_layer=[2] + [param_training["hidden_dim"]] * param_training["num_layers"],
         activation='relu'
-    ).to(device)
+    ).to(device=device, dtype=dtype)
 
 
 
@@ -84,10 +88,10 @@ if __name__ == "__main__":
 
     if args.trained_path:
         if args.compile:
-            checkpoint = torch.load(args.trained_path)
+            checkpoint = torch.load(args.trained_path, map_location=device)
             model.load_state_dict(checkpoint)
         elif not args.compile:
-            checkpoint = torch.load(args.trained_path)
+            checkpoint = torch.load(args.trained_path, map_location=device)
             new_state_dict = {}
 
             for k, v in checkpoint.items():
@@ -116,31 +120,32 @@ if __name__ == "__main__":
     U0 = case_params["Ma0"] * cs0
     Uax = U0 * case_params["Ns"]
     Uay = 0
-    basis = create_basis(Uax, Uay, device)
+    basis = create_basis(Uax, Uay, device, dtype=dtype)
    
     loss_func = calculate_relative_error
 
     print(f"Testing Case Cylinder on {device}.")
 
-    Fi0 = torch.tensor(all_Fi0[args.num_samples], device=device)
-    Gi0 = torch.tensor(all_Gi0[args.num_samples], device=device)
+    Fi0 = torch.as_tensor(all_Fi0[args.init_cond], device=device, dtype=dtype).unsqueeze(0)
+    Gi0 = torch.as_tensor(all_Gi0[args.init_cond], device=device, dtype=dtype).unsqueeze(0)
     loss=0
     print("Start testing")
     if args.with_obs is True:
         print("With obstacle")
     with torch.no_grad():  
             for i in tqdm(range(args.num_samples)):
-                rho, ux, uy, E = cylinder_solver.get_macroscopic(Fi0.squeeze(0), Gi0.squeeze(0))
+                rho, ux, uy, E = cylinder_solver.get_macroscopic(Fi0, Gi0)
                 T = cylinder_solver.get_temp_from_energy(ux, uy, E)
                 Feq = cylinder_solver.get_Feq(rho, ux, uy, T)
-                inputs = torch.stack([rho.unsqueeze(0), ux.unsqueeze(0), uy.unsqueeze(0), T.unsqueeze(0)], dim=1).to(device)
-                Geq_pred = model(inputs, basis)
+                inputs = torch.stack([rho, ux, uy, T], dim=1)
+                Geq_pred_flat = model(inputs, basis)
    
-                Geq_target = torch.tensor(all_Gi0[args.num_samples], device=device).unsqueeze(0)
+                Geq_target = torch.as_tensor(all_Geq[args.init_cond + i], device=device, dtype=dtype).unsqueeze(0)
 
-                inner_lose = loss_func(Geq_pred, Geq_target.permute(0, 2, 3, 1).reshape(-1, 9))
+                inner_lose = loss_func(Geq_pred_flat, Geq_target.permute(0, 2, 3, 1).reshape(-1, cylinder_solver.Qn))
                 loss += inner_lose
-                Fi0, Gi0 = cylinder_solver.collision(Fi0.squeeze(0), Gi0.squeeze(0), Feq, Geq_pred.permute(1, 0).reshape(9, cylinder_solver.Y, cylinder_solver.X), rho, ux, uy, T)
+                Geq_pred = Geq_pred_flat.reshape(1, cylinder_solver.Y, cylinder_solver.X, cylinder_solver.Qn).permute(0, 3, 1, 2)
+                Fi0, Gi0 = cylinder_solver.collision(Fi0, Gi0, Feq, Geq_pred, rho, ux, uy, T)
                 Fi, Gi = cylinder_solver.streaming(Fi0, Gi0)
                 if args.with_obs:
                     khi = torch.zeros_like(ux)
@@ -171,8 +176,8 @@ if __name__ == "__main__":
                     Gi0 = Gi
                 
                 #plot the results of the Mach number 
-                Ma_NN = cylinder_solver.get_local_Mach(ux, uy, T)
-                Ma_GT = all_Ma_GT[args.num_samples]
+                Ma_NN = cylinder_solver.get_local_Mach(ux, uy, T)[0]
+                Ma_GT = all_Ma_GT[args.init_cond + i]
                 plt.figure(figsize=(10, 5))
                 plt.subplot(1, 2, 1)
                 plt.imshow(Ma_NN.cpu().numpy(), cmap='jet')

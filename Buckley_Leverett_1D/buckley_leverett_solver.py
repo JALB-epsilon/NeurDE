@@ -8,6 +8,37 @@ import torch.nn as nn
 import yaml
 
 MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
+_TORCH_DTYPE_MAP = {
+    "float32": torch.float32,
+    "float64": torch.float64,
+}
+_NUMPY_DTYPE_MAP = {
+    "float32": np.float32,
+    "float64": np.float64,
+}
+
+
+def resolve_torch_dtype(dtype):
+    if isinstance(dtype, torch.dtype):
+        if dtype not in _TORCH_DTYPE_MAP.values():
+            raise ValueError(f"Unsupported torch dtype: {dtype}")
+        return dtype
+    dtype_name = str(dtype).lower()
+    if dtype_name not in _TORCH_DTYPE_MAP:
+        raise ValueError(f"Unsupported dtype '{dtype}'. Choose from: {sorted(_TORCH_DTYPE_MAP)}")
+    return _TORCH_DTYPE_MAP[dtype_name]
+
+
+def resolve_numpy_dtype(dtype):
+    if isinstance(dtype, np.dtype):
+        dtype_name = dtype.name
+    elif isinstance(dtype, type) and issubclass(dtype, np.generic):
+        dtype_name = np.dtype(dtype).name
+    else:
+        dtype_name = str(dtype).lower()
+    if dtype_name not in _NUMPY_DTYPE_MAP:
+        raise ValueError(f"Unsupported dtype '{dtype}'. Choose from: {sorted(_NUMPY_DTYPE_MAP)}")
+    return _NUMPY_DTYPE_MAP[dtype_name]
 
 
 def default_config_path():
@@ -29,15 +60,6 @@ def resolve_module_path(path):
     return os.path.join(MODULE_DIR, path)
 
 
-def _stack_batch_results(results):
-    first = results[0]
-    if torch.is_tensor(first):
-        return torch.stack(results, dim=0)
-    if isinstance(first, tuple):
-        return tuple(_stack_batch_results([result[idx] for result in results]) for idx in range(len(first)))
-    raise TypeError(f"Unsupported batch result type: {type(first)!r}")
-
-
 def initial_riemann(x, u_left, u_right, x0):
     return np.where(x <= x0, u_left, u_right).astype(np.float64)
 
@@ -52,9 +74,20 @@ def buckley_flux_prime(u, mobility_ratio=0.5):
     return 2.0 * mobility_ratio * u * (1.0 - u) / (denom**2)
 
 
-def reference_rollout(x, steps, dt, u_left, u_right, x0, mobility_ratio=0.5, reference_factor=8, cfl=0.45):
+def reference_rollout(
+    x,
+    steps,
+    dt,
+    u_left,
+    u_right,
+    x0,
+    mobility_ratio=0.5,
+    reference_factor=8,
+    cfl=0.45,
+    output_dtype=np.float32,
+):
     if steps <= 0:
-        return np.empty((0, len(x)), dtype=np.float32)
+        return np.empty((0, len(x)), dtype=output_dtype)
 
     x = np.asarray(x, dtype=np.float64)
     x_ref = np.linspace(x[0], x[-1], reference_factor * (len(x) - 1) + 1, dtype=np.float64)
@@ -80,7 +113,7 @@ def reference_rollout(x, steps, dt, u_left, u_right, x0, mobility_ratio=0.5, ref
             u_ref = np.clip(u_ref - (dt_ref / dx_ref) * (num_flux[1:] - num_flux[:-1]), 0.0, 1.0)
             current_t += dt_ref
 
-        rollout.append(u_ref[::reference_factor].astype(np.float32).copy())
+        rollout.append(u_ref[::reference_factor].astype(output_dtype).copy())
 
     return np.stack(rollout, axis=0)
 
@@ -100,6 +133,7 @@ class BuckleyLeverettSolver(nn.Module):
         u_left_bc=None,
         u_right_bc=None,
         mobility_ratio=0.5,
+        dtype=torch.float32,
     ):
         super().__init__()
         self.X = X
@@ -114,25 +148,26 @@ class BuckleyLeverettSolver(nn.Module):
         self.u_left_bc = u_left_bc
         self.u_right_bc = u_right_bc
         self.mobility_ratio = mobility_ratio
+        self.dtype = resolve_torch_dtype(dtype)
         self.dx = self.domain_length / max(self.X - 1, 1)
         self.dt = self.dx / self.lam
-        self.directions, self.weights = self._build_lattice(self.lattice, device)
-        self.velocities = self.lam * self.directions.to(dtype=torch.float32)
+        self.directions, self.weights = self._build_lattice(self.lattice, device, self.dtype)
+        self.velocities = self.lam * self.directions.to(dtype=self.dtype)
         self.Qn = int(self.velocities.numel())
 
     @staticmethod
-    def _build_lattice(lattice, device):
+    def _build_lattice(lattice, device, dtype):
         if lattice == "D1Q2":
-            directions = torch.tensor([-1.0, 1.0], dtype=torch.float32, device=device)
-            weights = torch.tensor([0.5, 0.5], dtype=torch.float32, device=device)
+            directions = torch.tensor([-1.0, 1.0], dtype=dtype, device=device)
+            weights = torch.tensor([0.5, 0.5], dtype=dtype, device=device)
             return directions, weights
         if lattice == "D1Q5":
-            directions = torch.tensor([-2.0, -1.0, 0.0, 1.0, 2.0], dtype=torch.float32, device=device)
-            weights = torch.tensor([1.0, 4.0, 6.0, 4.0, 1.0], dtype=torch.float32, device=device) / 16.0
+            directions = torch.tensor([-2.0, -1.0, 0.0, 1.0, 2.0], dtype=dtype, device=device)
+            weights = torch.tensor([1.0, 4.0, 6.0, 4.0, 1.0], dtype=dtype, device=device) / 16.0
             return directions, weights
         if lattice == "D2Q9":
-            directions = torch.tensor([1.0, 0.0, -1.0, 0.0, 1.0, -1.0, -1.0, 1.0, 0.0], dtype=torch.float32, device=device)
-            weights = torch.tensor([1.0 / 9.0, 1.0 / 9.0, 1.0 / 9.0, 1.0 / 9.0, 1.0 / 36.0, 1.0 / 36.0, 1.0 / 36.0, 1.0 / 36.0, 4.0 / 9.0], dtype=torch.float32, device=device)
+            directions = torch.tensor([1.0, 0.0, -1.0, 0.0, 1.0, -1.0, -1.0, 1.0, 0.0], dtype=dtype, device=device)
+            weights = torch.tensor([1.0 / 9.0, 1.0 / 9.0, 1.0 / 9.0, 1.0 / 9.0, 1.0 / 36.0, 1.0 / 36.0, 1.0 / 36.0, 1.0 / 36.0, 4.0 / 9.0], dtype=dtype, device=device)
             return directions, weights
         raise ValueError(f"Unsupported Buckley-Leverett lattice: {lattice}")
 
@@ -150,15 +185,14 @@ class BuckleyLeverettSolver(nn.Module):
         return u**2 / denom
 
     def equilibrium_newton(self, u):
-        if u.dim() > 1:
-            return _stack_batch_results([self.equilibrium_newton(u[idx]) for idx in range(u.shape[0])])
         eps = 1e-8
-        target_mass = u.clamp(0.0, 1.0)
+        leading_shape = u.shape[:-1]
+        target_mass = u.clamp(0.0, 1.0).reshape(-1)
         target_flux = self.flux(target_mass)
-        equilibrium = torch.zeros((self.Qn, *u.shape), dtype=u.dtype, device=u.device)
+        equilibrium = torch.zeros((self.Qn, target_mass.numel()), dtype=u.dtype, device=u.device)
         active = target_mass > eps
         if not torch.any(active):
-            return equilibrium
+            return equilibrium.transpose(0, 1).reshape(*leading_shape, u.shape[-1], self.Qn).movedim(-1, -2)
 
         active_mass = target_mass[active]
         active_flux = target_flux[active]
@@ -189,16 +223,14 @@ class BuckleyLeverettSolver(nn.Module):
 
         exponent = logw + alpha[None, :] + beta[None, :] * vel
         equilibrium[:, active] = torch.exp(exponent)
-        return equilibrium
+        return equilibrium.transpose(0, 1).reshape(*leading_shape, u.shape[-1], self.Qn).movedim(-1, -2)
 
     def equilibrium(self, u):
-        if u.dim() > 1:
-            return _stack_batch_results([self.equilibrium(u[idx]) for idx in range(u.shape[0])])
         if self.lattice == "D1Q2":
             flux = self.flux(u)
             f_minus = 0.5 * (u - flux / self.lam)
             f_plus = 0.5 * (u + flux / self.lam)
-            return torch.stack([f_minus, f_plus], dim=0)
+            return torch.stack([f_minus, f_plus], dim=-2)
         return self.equilibrium_newton(u)
 
     def macro(self, F):
@@ -214,8 +246,6 @@ class BuckleyLeverettSolver(nn.Module):
         return F - self.omega * (F - Feq)
 
     def streaming(self, F):
-        if F.dim() > 2:
-            return _stack_batch_results([self.streaming(F[idx]) for idx in range(F.shape[0])])
         streamed = torch.empty_like(F)
         left_eq = None
         right_eq = None
@@ -224,18 +254,24 @@ class BuckleyLeverettSolver(nn.Module):
             right_eq = self.boundary_equilibrium(self.u_right_bc, F.dtype)
         for idx, direction in enumerate(self.directions.to(dtype=torch.int64).tolist()):
             if direction == 0:
-                streamed[idx] = F[idx]
+                streamed[..., idx, :] = F[..., idx, :]
                 continue
             shift = abs(int(direction))
             if self.boundary == "periodic":
-                streamed[idx] = torch.roll(F[idx], shifts=direction, dims=0)
+                streamed[..., idx, :] = torch.roll(F[..., idx, :], shifts=direction, dims=-1)
                 continue
             if direction > 0:
-                streamed[idx, shift:] = F[idx, :-shift]
-                streamed[idx, :shift] = left_eq[idx] if self.boundary == "riemann" and left_eq is not None else F[idx, 0]
+                streamed[..., idx, shift:] = F[..., idx, :-shift]
+                if self.boundary == "riemann" and left_eq is not None:
+                    streamed[..., idx, :shift] = left_eq[idx]
+                else:
+                    streamed[..., idx, :shift] = F[..., idx, 0].unsqueeze(-1)
             else:
-                streamed[idx, :-shift] = F[idx, shift:]
-                streamed[idx, -shift:] = right_eq[idx] if self.boundary == "riemann" and right_eq is not None else F[idx, -1]
+                streamed[..., idx, :-shift] = F[..., idx, shift:]
+                if self.boundary == "riemann" and right_eq is not None:
+                    streamed[..., idx, -shift:] = right_eq[idx]
+                else:
+                    streamed[..., idx, -shift:] = F[..., idx, -1].unsqueeze(-1)
         return streamed
 
     def step(self, F, Feq=None):
@@ -251,6 +287,7 @@ def main():
     parser.add_argument("--config", type=str, default=default_config_path())
     parser.add_argument("--steps", type=int, default=200)
     parser.add_argument("--device", type=str, default="cpu")
+    parser.add_argument("--dtype", type=str, default="float32", choices=["float32", "float64"])
     args = parser.parse_args()
 
     config_path = resolve_config_path(args.config)
@@ -259,6 +296,8 @@ def main():
     data_path = resolve_module_path(config["data_dir"])
     os.makedirs(os.path.dirname(data_path), exist_ok=True)
 
+    torch_dtype = resolve_torch_dtype(args.dtype)
+    numpy_dtype = resolve_numpy_dtype(args.dtype)
     solver = BuckleyLeverettSolver(
         X=config["X"],
         lam=config["lam"],
@@ -272,6 +311,7 @@ def main():
         u_left_bc=config.get("u_left"),
         u_right_bc=config.get("u_right"),
         mobility_ratio=config.get("mobility_ratio", 0.5),
+        dtype=torch_dtype,
     )
 
     x = solver.x_grid()
@@ -288,12 +328,13 @@ def main():
         mobility_ratio=config.get("mobility_ratio", 0.5),
         reference_factor=config.get("reference_factor", 8),
         cfl=config.get("reference_cfl", 0.45),
+        output_dtype=numpy_dtype,
     )
     for step in range(args.steps):
         u = reference[step]
-        all_u.append(u.astype(np.float32))
-        feq = solver.equilibrium(torch.tensor(u, dtype=torch.float32, device=solver.device))
-        all_Feq.append(feq.cpu().numpy().astype(np.float32))
+        all_u.append(u.astype(numpy_dtype))
+        feq = solver.equilibrium(torch.tensor(u, dtype=torch_dtype, device=solver.device))
+        all_Feq.append(feq.cpu().numpy().astype(numpy_dtype))
 
     with h5py.File(data_path, "w") as handle:
         handle.create_dataset("u", data=np.stack(all_u))

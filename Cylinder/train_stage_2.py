@@ -21,12 +21,15 @@ if __name__ == "__main__":
     parser.add_argument('--num_samples', type=int, default=500, help='Number of samples')
     parser.add_argument("--save_frequency", default=1, help='Save model')
     parser.add_argument("--pre_trained_path", type=str, default=None)
+    parser.add_argument("--dtype", type=str, default="float32", choices=["float32", "float64"])
     parser.set_defaults(save_model=True)
     args = parser.parse_args()
 
     device = get_device(args.device)
-    args.pre_trained_path = args.pre_trained_path.replace("Cylinder/", "")
-    print(args.pre_trained_path)
+    dtype = resolve_torch_dtype(args.dtype)
+    if args.pre_trained_path:
+        args.pre_trained_path = args.pre_trained_path.replace("Cylinder/", "")
+        print(args.pre_trained_path)
 
 
     with open("cylinder_param.yml", 'r') as stream:
@@ -47,7 +50,8 @@ if __name__ == "__main__":
                                     vuy=case_params['vuy'],
                                     Pr=case_params['Pr'],
                                     Ns=case_params['Ns'],
-                                    device=device
+                                    device=device,
+                                    dtype=dtype,
                                     )
 
     with open("cylinder_param_training.yml", 'r') as stream:
@@ -61,6 +65,7 @@ if __name__ == "__main__":
                                     all_Feq=all_Feq[:args.num_samples],
                                     all_Geq=all_Geq[:args.num_samples],
                                     number_of_rollout=number_of_rollout,
+                                    dtype=dtype,
                                     )
 
     stage2_batch_size = param_training["stage2"].get("batch_size", 1)
@@ -68,13 +73,14 @@ if __name__ == "__main__":
     val_dataset = Cylinder_stage2(F = all_F[args.num_samples:args.num_samples+100],
                                         G=all_G[args.num_samples:args.num_samples+100],
                                         Feq=all_Feq[args.num_samples:args.num_samples+100],
-                                        Geq=all_Geq[args.num_samples:args.num_samples+100],)
+                                        Geq=all_Geq[args.num_samples:args.num_samples+100],
+                                        dtype=dtype,)
 
     model = NeurDE(
         alpha_layer=[4] + [param_training["hidden_dim"]] * param_training["num_layers"],
         phi_layer=[2] + [param_training["hidden_dim"]] * param_training["num_layers"],
         activation='relu'
-    ).to(device)
+    ).to(device=device, dtype=dtype)
 
     if args.compile:
         model = torch.compile(model)
@@ -88,10 +94,10 @@ if __name__ == "__main__":
 
     if args.pre_trained_path:
         if args.compile:
-            checkpoint = torch.load(args.pre_trained_path)
+            checkpoint = torch.load(args.pre_trained_path, map_location=device)
             model.load_state_dict(checkpoint)
         elif not args.compile:
-            checkpoint = torch.load(args.pre_trained_path)
+            checkpoint = torch.load(args.pre_trained_path, map_location=device)
             new_state_dict = {}
 
             for k, v in checkpoint.items():
@@ -117,10 +123,10 @@ if __name__ == "__main__":
     U0 = case_params["Ma0"] * cs0
     Uax = U0 * case_params["Ns"]
     Uay = 0
-    basis = create_basis(Uax, Uay, device)
+    basis = create_basis(Uax, Uay, device, dtype=dtype)
 
     epochs = param_training["stage2"]["epochs"]
-    loss_func = calculate_relative_error
+    loss_func = calculate_batch_relative_error
 
     print(f"Training Case Cylinder on {device}. Epochs: {epochs}, Samples: {args.num_samples}")
 
@@ -137,13 +143,13 @@ if __name__ == "__main__":
         for batch_idx, (F_seq, G_seq, Feq_seq, Geq_seq) in enumerate(dataloader):
             optimizer.zero_grad()
             model.train()
-            F_seq = F_seq.to(device)
-            G_seq = G_seq.to(device)
-            Geq_seq = Geq_seq.to(device)
+            F_seq = F_seq.to(device=device, dtype=dtype)
+            G_seq = G_seq.to(device=device, dtype=dtype)
+            Geq_seq = Geq_seq.to(device=device, dtype=dtype)
             batch_size = F_seq.shape[0]
             Fi0 = F_seq[:, 0, ...]
             Gi0 = G_seq[:, 0, ...]
-            total_loss = torch.zeros((), device=device)
+            total_loss = torch.zeros((), device=device, dtype=dtype)
             for rollout in range(number_of_rollout):
                 rho, ux, uy, E = cylinder_solver.get_macroscopic(Fi0, Gi0)
                 T = cylinder_solver.get_temp_from_energy(ux, uy, E)
@@ -153,10 +159,7 @@ if __name__ == "__main__":
                 Geq_target = Geq_seq[:, rollout]
                 pred_batch = Geq_pred_flat.reshape(batch_size, cylinder_solver.Y * cylinder_solver.X, cylinder_solver.Qn)
                 target_batch = Geq_target.permute(0, 2, 3, 1).reshape(batch_size, cylinder_solver.Y * cylinder_solver.X, cylinder_solver.Qn)
-                inner_loss = torch.stack([
-                    loss_func(pred_batch[sample_idx], target_batch[sample_idx])
-                    for sample_idx in range(batch_size)
-                ]).mean()
+                inner_loss = loss_func(pred_batch, target_batch)
                 total_loss = total_loss + inner_loss
                 Geq_pred = Geq_pred_flat.reshape(batch_size, cylinder_solver.Y, cylinder_solver.X, cylinder_solver.Qn).permute(0, 3, 1, 2)
                 Fi0, Gi0 = cylinder_solver.collision(Fi0, Gi0, Feq, Geq_pred, rho, ux, uy, T)

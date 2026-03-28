@@ -2,22 +2,13 @@ import torch.nn as nn
 import torch     
 import numpy as np  
 from src import *
-from utilities import detach, get_device
+from utilities import detach, get_device, resolve_torch_dtype
 
 
 def _as_solver_tensor(value, dtype, device):
     if torch.is_tensor(value):
         return value.to(device=device, dtype=dtype)
     return torch.as_tensor(value, dtype=dtype, device=device)
-
-
-def _stack_batch_results(results):
-    first = results[0]
-    if torch.is_tensor(first):
-        return torch.stack(results, dim=0)
-    if isinstance(first, tuple):
-        return tuple(_stack_batch_results([result[idx] for result in results]) for idx in range(len(first)))
-    raise TypeError(f"Unsupported batch result type: {type(first)!r}")
 
 
 class Cylinder_base(nn.Module):
@@ -35,7 +26,8 @@ class Cylinder_base(nn.Module):
                 vuy=1.4,
                 Pr=0.71,
                 Ns=0.6,
-                device='cuda'
+                device='cuda',
+                dtype=torch.float32,
                 ):
         super(Cylinder_base, self).__init__()
         self.X = X
@@ -54,13 +46,14 @@ class Cylinder_base(nn.Module):
         self.Ma0 = Ma0
         self.Re = Re
         self.device = device
+        self.dtype = resolve_torch_dtype(dtype)
         ex_values = [1, 0, -1, 0, 1, -1, -1, 1, 0]
         ey_values = [0, 1, 0, -1, 1, 1, -1, -1, 0]
         self.get_shift_constants()
-        self.ex = torch.tensor(ex_values, dtype=torch.float32, device=self.device) + self.Uax
-        self.ey = torch.tensor(ey_values, dtype=torch.float32, device=self.device) + self.Uay
-        self.ex1 = torch.tensor(ex_values, dtype=torch.float32, device=self.device)
-        self.ey1 = torch.tensor(ey_values, dtype=torch.float32, device=self.device)
+        self.ex = torch.tensor(ex_values, dtype=self.dtype, device=self.device) + self.Uax
+        self.ey = torch.tensor(ey_values, dtype=self.dtype, device=self.device) + self.Uay
+        self.ex1 = torch.tensor(ex_values, dtype=self.dtype, device=self.device)
+        self.ey1 = torch.tensor(ey_values, dtype=self.dtype, device=self.device)
         del ex_values, ey_values
         self.get_derived_quantities()
         self.create_obstacle()
@@ -190,9 +183,9 @@ class Cylinder_base(nn.Module):
         pop_dim = 1 if F.dim() == 4 else 0
         EPS = diff.mean(dim=pop_dim)
         alpha = torch.ones_like(EPS)
-        alpha = torch.where(EPS < 0.01, torch.tensor(1.0, device=EPS.device), alpha)
-        alpha = torch.where(EPS < 0.1, torch.tensor(self.alpha01, device=EPS.device), alpha)
-        alpha = torch.where(EPS < 1, torch.tensor(self.alpha1, device=EPS.device), alpha)
+        alpha = torch.where(EPS < 0.01, EPS.new_tensor(1.0), alpha)
+        alpha = torch.where(EPS < 0.1, EPS.new_tensor(self.alpha01), alpha)
+        alpha = torch.where(EPS < 1, EPS.new_tensor(self.alpha1), alpha)
         alpha = torch.where(EPS >= 1, 1 / tau_DL, alpha)  
         tau_EPS = alpha * tau_DL
         if F.dim() == 4:
@@ -205,46 +198,18 @@ class Cylinder_base(nn.Module):
         return omega, omegaT
    
     def get_Feq(self, rho, ux, uy, T):
-        if rho.dim() == 3:
-            return _stack_batch_results([
-                self.get_Feq(rho[idx], ux[idx], uy[idx], T[idx])
-                for idx in range(rho.shape[0])
-            ])
         Feq = F_pop_torch.compute_Feq(rho, ux, self.Uax, uy, self.Uay, T)
         return Feq
     
     def get_Feq_obs(self, rho, ux, uy, T):
-        if rho.dim() == 3:
-            return _stack_batch_results([
-                self.get_Feq_obs(rho[idx], ux[idx], uy[idx], T[idx])
-                for idx in range(rho.shape[0])
-            ])
         Feq_Obs = F_pop_torch.compute_Feq_obstacle(rho, ux, self.Uax, uy, self.Uay, T, obstacle=self.Obs)
         return Feq_Obs
     
     def get_Feq_BC(self, rho, ux, uy, T):
-        if rho.dim() == 3:
-            return _stack_batch_results([
-                self.get_Feq_BC(rho[idx], ux[idx], uy[idx], T[idx])
-                for idx in range(rho.shape[0])
-            ])
         Feq_BC = F_pop_torch.compute_Feq_BC(rho, ux, self.Uax, uy, self.Uay, T, self.coly, 0)        
         return Feq_BC
     
     def get_Geq_Newton_solver(self, rho, ux, uy, T, khi, zetax, zetay):
-        if rho.dim() == 3:
-            return _stack_batch_results([
-                self.get_Geq_Newton_solver(
-                    rho[idx],
-                    ux[idx],
-                    uy[idx],
-                    T[idx],
-                    khi[idx],
-                    zetax[idx],
-                    zetay[idx],
-                )
-                for idx in range(rho.shape[0])
-            ])
         dtype = rho.dtype
         khi = _as_solver_tensor(khi, dtype, self.device)
         zetax = _as_solver_tensor(zetax, dtype, self.device)
@@ -265,19 +230,6 @@ class Cylinder_base(nn.Module):
         )
     
     def get_Geq_Newton_solver_obs(self, rho, ux, uy, T, khi, zetax, zetay):
-        if rho.dim() == 3:
-            return _stack_batch_results([
-                self.get_Geq_Newton_solver_obs(
-                    rho[idx],
-                    ux[idx],
-                    uy[idx],
-                    T[idx],
-                    khi[idx],
-                    zetax[idx],
-                    zetay[idx],
-                )
-                for idx in range(rho.shape[0])
-            ])
         dtype = rho.dtype
         khi = _as_solver_tensor(khi, dtype, self.device)
         zetax = _as_solver_tensor(zetax, dtype, self.device)
@@ -299,19 +251,6 @@ class Cylinder_base(nn.Module):
         )
     
     def get_Geq_Newton_solver_BC(self, rho, ux, uy, T, khi, zetax, zetay):
-        if rho.dim() == 3:
-            return _stack_batch_results([
-                self.get_Geq_Newton_solver_BC(
-                    rho[idx],
-                    ux[idx],
-                    uy[idx],
-                    T[idx],
-                    khi[idx],
-                    zetax[idx],
-                    zetay[idx],
-                )
-                for idx in range(rho.shape[0])
-            ])
         dtype = rho.dtype
         khi = _as_solver_tensor(khi, dtype, self.device)
         zetax = _as_solver_tensor(zetax, dtype, self.device)
@@ -335,24 +274,12 @@ class Cylinder_base(nn.Module):
 
 
     def get_obs_distribution(self, rho, ux, uy, T, khi, zetax, zetay):
-        if rho.dim() == 3:
-            return _stack_batch_results([
-                self.get_obs_distribution(
-                    rho[idx],
-                    ux[idx],
-                    uy[idx],
-                    T[idx],
-                    khi[idx],
-                    zetax[idx],
-                    zetay[idx],
-                )
-                for idx in range(rho.shape[0])
-            ])
         # Obstacle distribution
-        ux_obs = torch.where(self.Obs, torch.tensor(0.0, device=self.device), ux)
-        uy_obs = torch.where(self.Obs, torch.tensor(0.0, device=self.device), uy)
-        T_obs = torch.where(self.Obs, torch.tensor(self.T0, device=self.device), T)
-        rho_obs = torch.where(self.Obs, torch.tensor(1.0, device=self.device), rho)
+        zero = torch.zeros((), device=self.device, dtype=ux.dtype)
+        ux_obs = torch.where(self.Obs, zero, ux)
+        uy_obs = torch.where(self.Obs, zero, uy)
+        T_obs = torch.where(self.Obs, torch.full((), self.T0, device=self.device, dtype=T.dtype), T)
+        rho_obs = torch.where(self.Obs, torch.ones((), device=self.device, dtype=rho.dtype), rho)
                     
         #ux_obs = ux.clone()
         #uy_obs = uy.clone()
@@ -374,10 +301,16 @@ class Cylinder_base(nn.Module):
                                                             zetay)                                                                                  
   
         # Inlet
-        ux_obs[self.coly, 0] = self.U0
-        uy_obs[self.coly, 0] = 0
-        T_obs[self.coly, 0] = self.T0
-        rho_obs[self.coly, 0] = self.rho0
+        if ux_obs.dim() == 3:
+            ux_obs[:, self.coly, 0] = self.U0
+            uy_obs[:, self.coly, 0] = 0
+            T_obs[:, self.coly, 0] = self.T0
+            rho_obs[:, self.coly, 0] = self.rho0
+        else:
+            ux_obs[self.coly, 0] = self.U0
+            uy_obs[self.coly, 0] = 0
+            T_obs[self.coly, 0] = self.T0
+            rho_obs[self.coly, 0] = self.rho0
 
 
         Fi_obs_Inlet = self.get_Feq_BC(rho_obs, ux_obs, uy_obs, T_obs)
@@ -451,20 +384,6 @@ class Cylinder_base(nn.Module):
         return Fo1, Go1
                
     def collision(self, F, G, Feq, Geq, rho, ux, uy, T ):
-        if F.dim() == 4:
-            return _stack_batch_results([
-                self.collision(
-                    F[idx],
-                    G[idx],
-                    Feq[idx],
-                    Geq[idx],
-                    rho[idx],
-                    ux[idx],
-                    uy[idx],
-                    T[idx],
-                )
-                for idx in range(F.shape[0])
-            ])
         omega, omegaT = self.get_relaxation_time(rho, T, F, Feq)
         Gis = self.from_macro_to_lattice_Gis(F, rho, ux, uy, T)
         F_pos_collision = F - omega * (F - Feq)
@@ -473,21 +392,15 @@ class Cylinder_base(nn.Module):
     
     def shift_operator(self, F, G):
         if F.dim() == 4:
-            return _stack_batch_results([
-                self.shift_operator(F[idx], G[idx])
-                for idx in range(F.shape[0])
-            ])
+            Fi = F[:, self.q_indices, self.Y_indices, self.X_indices]
+            Gi = G[:, self.q_indices, self.Y_indices, self.X_indices]
+            return Fi, Gi
         Fi = F[self.q_indices, self.Y_indices, self.X_indices]
         Gi = G[self.q_indices, self.Y_indices, self.X_indices]
         return Fi, Gi
     
     
     def streaming(self, F_pos_coll, G_pos_coll):
-        if F_pos_coll.dim() == 4:
-            return _stack_batch_results([
-                self.streaming(F_pos_coll[idx], G_pos_coll[idx])
-                for idx in range(F_pos_coll.shape[0])
-            ])
         Fo1, Go1 = self.interpolate_domain(F_pos_coll, G_pos_coll)
         Fi, Gi = self.shift_operator(Fo1, Go1)      
         return Fi, Gi
@@ -520,41 +433,39 @@ class Cylinder_base(nn.Module):
                                               
 
     def enforce_Obs_and_BC(self, Fi, Gi, Fi_obs_cyl, Gi_obs_cyl, Fi_obs_Inlet, Gi_obs_Inlet):
-        if Fi.dim() == 4:
-            return _stack_batch_results([
-                self.enforce_Obs_and_BC(
-                    Fi[idx],
-                    Gi[idx],
-                    Fi_obs_cyl[idx],
-                    Gi_obs_cyl[idx],
-                    Fi_obs_Inlet[idx],
-                    Gi_obs_Inlet[idx],
-                )
-                for idx in range(Fi.shape[0])
-            ])
-
         Fi_obs = Fi.clone()
         Gi_obs = Gi.clone()
 
-        # Obstacle
-        Fi_obs[:, self.Obs] = Fi_obs_cyl
-        Gi_obs[:, self.Obs] = Gi_obs_cyl
+        if Fi.dim() == 4:
+            Fi_obs[:, :, self.Obs] = Fi_obs_cyl
+            Gi_obs[:, :, self.Obs] = Gi_obs_cyl
 
-        #Inlet
-        Fi_obs[:, self.coly, 0] = Fi_obs_Inlet
-        Gi_obs[:, self.coly, 0] = Gi_obs_Inlet
+            Fi_obs[:, :, self.coly, 0] = Fi_obs_Inlet
+            Gi_obs[:, :, self.coly, 0] = Gi_obs_Inlet
 
-        # Outlet
-        Fi_obs[:, self.coly, self.X-1] = Fi_obs[:, self.coly, self.X-2]
-        Gi_obs[:, self.coly, self.X-1] = Gi_obs[:, self.coly, self.X-2]
+            Fi_obs[:, :, self.coly, self.X-1] = Fi_obs[:, :, self.coly, self.X-2]
+            Gi_obs[:, :, self.coly, self.X-1] = Gi_obs[:, :, self.coly, self.X-2]
 
-        # Upper wall
-        Fi_obs[:, 0, self.colx] = Fi_obs[:, 1, self.colx]
-        Gi_obs[:, 0, self.colx] = Gi_obs[:, 1, self.colx]
+            Fi_obs[:, :, 0, self.colx] = Fi_obs[:, :, 1, self.colx]
+            Gi_obs[:, :, 0, self.colx] = Gi_obs[:, :, 1, self.colx]
 
-        # Lower wall
-        Fi_obs[:, self.Y-1, self.colx] = Fi_obs[:, self.Y-2, self.colx]
-        Gi_obs[:, self.Y-1, self.colx] = Gi_obs[:, self.Y-2, self.colx]
+            Fi_obs[:, :, self.Y-1, self.colx] = Fi_obs[:, :, self.Y-2, self.colx]
+            Gi_obs[:, :, self.Y-1, self.colx] = Gi_obs[:, :, self.Y-2, self.colx]
+        else:
+            Fi_obs[:, self.Obs] = Fi_obs_cyl
+            Gi_obs[:, self.Obs] = Gi_obs_cyl
+
+            Fi_obs[:, self.coly, 0] = Fi_obs_Inlet
+            Gi_obs[:, self.coly, 0] = Gi_obs_Inlet
+
+            Fi_obs[:, self.coly, self.X-1] = Fi_obs[:, self.coly, self.X-2]
+            Gi_obs[:, self.coly, self.X-1] = Gi_obs[:, self.coly, self.X-2]
+
+            Fi_obs[:, 0, self.colx] = Fi_obs[:, 1, self.colx]
+            Gi_obs[:, 0, self.colx] = Gi_obs[:, 1, self.colx]
+
+            Fi_obs[:, self.Y-1, self.colx] = Fi_obs[:, self.Y-2, self.colx]
+            Gi_obs[:, self.Y-1, self.colx] = Gi_obs[:, self.Y-2, self.colx]
 
 
         return Fi_obs, Gi_obs
@@ -575,10 +486,12 @@ def main():
     parser.add_argument('--no-save', dest='save', action='store_false', help='Do not save file in database')
     parser.add_argument("--plot", dest='plot', action='store_true', help='Plot the results', default=False)
     parser.add_argument("--compile", dest='compile', action='store_true', help='Compile the functions', default=False)
+    parser.add_argument("--dtype", type=str, default="float32", choices=["float32", "float64"])
     parser.set_defaults(save=True)
 
     args = parser.parse_args()
     device = get_device(args.device)
+    dtype = resolve_torch_dtype(args.dtype)
     with open ('cylinder_param.yml', 'r') as file:
         config = yaml.safe_load(file)
 
@@ -599,7 +512,8 @@ def main():
                                     vuy=config['vuy'],
                                     Pr=config['Pr'],
                                     Ns=config['Ns'],
-                                    device=device
+                                    device=device,
+                                    dtype=dtype,
                                     )
     
    

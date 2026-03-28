@@ -21,16 +21,16 @@ class F_pop_torch(nn.Module):
 
     @staticmethod
     def _compute_feq_core(rho, Phi, shape, device):
-        Feq = torch.zeros((9, *shape), device=device)
-        Feq[0] = rho * Phi["px"] * Phi["0y"]
-        Feq[1] = rho * Phi["0x"] * Phi["py"]
-        Feq[2] = rho * Phi["mx"] * Phi["0y"]
-        Feq[3] = rho * Phi["0x"] * Phi["my"]
-        Feq[4] = rho * Phi["px"] * Phi["py"]
-        Feq[5] = rho * Phi["mx"] * Phi["py"]
-        Feq[6] = rho * Phi["mx"] * Phi["my"]
-        Feq[7] = rho * Phi["px"] * Phi["my"]
-        Feq[8] = rho * Phi["0x"] * Phi["0y"]
+        Feq = torch.zeros(shape, device=device, dtype=rho.dtype)
+        Feq[..., 0, :] = rho * Phi["px"] * Phi["0y"]
+        Feq[..., 1, :] = rho * Phi["0x"] * Phi["py"]
+        Feq[..., 2, :] = rho * Phi["mx"] * Phi["0y"]
+        Feq[..., 3, :] = rho * Phi["0x"] * Phi["my"]
+        Feq[..., 4, :] = rho * Phi["px"] * Phi["py"]
+        Feq[..., 5, :] = rho * Phi["mx"] * Phi["py"]
+        Feq[..., 6, :] = rho * Phi["mx"] * Phi["my"]
+        Feq[..., 7, :] = rho * Phi["px"] * Phi["my"]
+        Feq[..., 8, :] = rho * Phi["0x"] * Phi["0y"]
         return Feq
 
     @staticmethod
@@ -38,21 +38,28 @@ class F_pop_torch(nn.Module):
         ux_diff = ux - Uax
         uy_diff = uy - Uay
         Phi = F_pop_torch._compute_phi(ux_diff, uy_diff, T)  # Call static method with class name
-        return F_pop_torch._compute_feq_core(rho, Phi, T.shape, T.device)
+        leading_shape = T.shape[:-2]
+        spatial_points = T.shape[-2] * T.shape[-1]
+        rho_flat = rho.reshape(*leading_shape, spatial_points)
+        phi_flat = {key: value.reshape(*leading_shape, spatial_points) for key, value in Phi.items()}
+        Feq = F_pop_torch._compute_feq_core(rho_flat, phi_flat, (*leading_shape, 9, spatial_points), T.device)
+        return Feq.reshape(*leading_shape, 9, T.shape[-2], T.shape[-1])
 
     @staticmethod
     def compute_Feq_obstacle(rho, ux, Uax, uy, Uay, T, obstacle):
-        ux_diff = ux[obstacle] - Uax
-        uy_diff = uy[obstacle] - Uay
-        Phi = F_pop_torch._compute_phi(ux_diff, uy_diff, T[obstacle])
-        return F_pop_torch._compute_feq_core(rho[obstacle], Phi, (obstacle.sum(),), T.device)
+        ux_diff = ux[..., obstacle] - Uax
+        uy_diff = uy[..., obstacle] - Uay
+        Phi = F_pop_torch._compute_phi(ux_diff, uy_diff, T[..., obstacle])
+        leading_shape = ux_diff.shape[:-1]
+        return F_pop_torch._compute_feq_core(rho[..., obstacle], Phi, (*leading_shape, 9, obstacle.sum().item()), T.device)
 
     @staticmethod
     def compute_Feq_BC(rho, ux, Uax, uy, Uay, T, row, col):
-        ux_diff = ux[row, col] - Uax
-        uy_diff = uy[row, col] - Uay
-        Phi = F_pop_torch._compute_phi(ux_diff, uy_diff, T[row, col])
-        return F_pop_torch._compute_feq_core(rho[row, col], Phi, (row.shape[0],), T.device)
+        ux_diff = ux[..., row, col] - Uax
+        uy_diff = uy[..., row, col] - Uay
+        Phi = F_pop_torch._compute_phi(ux_diff, uy_diff, T[..., row, col])
+        leading_shape = ux_diff.shape[:-1]
+        return F_pop_torch._compute_feq_core(rho[..., row, col], Phi, (*leading_shape, 9, row.shape[0]), T.device)
 
     def forward(self, rho, ux, Uax, uy, Uay, T, obstacle=None, bc_indices=None):
         if obstacle is None and bc_indices is None:

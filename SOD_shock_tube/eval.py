@@ -8,6 +8,7 @@ import os
 from torch.utils.data import DataLoader
 from train_stage_1 import create_basis
 from SOD_solver import SODSolver
+from exact_solution import build_exact_macro_rollout
 import torch.nn as nn
 
 if __name__ == "__main__":
@@ -22,12 +23,15 @@ if __name__ == "__main__":
     parser.add_argument("--init_cond",  type=int, default=500, help='Number of samples')
     parser.add_argument("--save_frequency", default=50, help='Save model')
     parser.add_argument("--trained_path", type=str, default=None)
+    parser.add_argument("--dtype", type=str, default="float32", choices=["float32", "float64"])
     parser.set_defaults(save_model=True)
     args = parser.parse_args()
 
     device = get_device(args.device)
+    dtype = resolve_torch_dtype(args.dtype)
 
-    
+    if not args.trained_path:
+        raise ValueError("--trained_path is required for SOD evaluation.")
     args.trained_path = args.trained_path.replace("SOD_shock_tube/", "")
     print(args.trained_path)
     case_part = args.trained_path.split('/')[1]
@@ -53,13 +57,15 @@ if __name__ == "__main__":
         muy=case_params['muy'],
         Uax=case_params['Uax'],
         Uay=case_params['Uay'],
-        device=case_params['device']
+        device=case_params['device'],
+        dtype=dtype,
     )
 
     with open("Sod_cases_param_training.yml", 'r') as stream:
         training_config = yaml.safe_load(stream)
     param_training = training_config[args.case]
     number_of_rollout = param_training["stage2"]["N"]
+    supervision_mode = param_training["stage2"].get("supervision", "geq").lower()
 
     os.makedirs(param_training["stage2"]["model_dir"], exist_ok=True)
     all_F, all_G, all_Feq, all_Geq = load_data_stage_2(param_training["data_dir"])
@@ -68,7 +74,7 @@ if __name__ == "__main__":
         alpha_layer=[4] + [param_training["hidden_dim"]] * param_training["num_layers"],
         phi_layer=[2] + [param_training["hidden_dim"]] * param_training["num_layers"],
         activation='relu'
-    ).to(device)
+    ).to(device=device, dtype=dtype)
 
 
 
@@ -82,10 +88,10 @@ if __name__ == "__main__":
 
     if args.trained_path:
         if args.compile:
-            checkpoint = torch.load(args.trained_path)
+            checkpoint = torch.load(args.trained_path, map_location=device)
             model.load_state_dict(checkpoint)
         elif not args.compile:
-            checkpoint = torch.load(args.trained_path)
+            checkpoint = torch.load(args.trained_path, map_location=device)
             new_state_dict = {}
 
             for k, v in checkpoint.items():
@@ -110,34 +116,59 @@ if __name__ == "__main__":
 
     all_P = all_rho * all_T
 
+    use_exact_macro = supervision_mode == "exact_macro" and "exact_left_state" in case_params
+    if use_exact_macro:
+        exact_steps = args.init_cond + args.num_samples + 1
+        exact_rho, exact_ux, exact_uy, exact_T = build_exact_macro_rollout(
+            case_params,
+            exact_steps,
+            backend="torch",
+            dtype=dtype_name_from_torch(dtype),
+            device=device,
+        )
+
     Uax, Uay = case_params["Uax"], case_params["Uay"]
-    basis = create_basis(Uax, Uay, device)
+    basis = create_basis(Uax, Uay, device, dtype=dtype)
    
     loss_func = calculate_relative_error
+    macro_loss_func = calculate_batch_relative_error
 
     print(f"Testing Case {args.case} on {device}.")
 
-    Fi0 = torch.tensor(all_Fi0[args.num_samples], device=device)
-    Gi0 = torch.tensor(all_Gi0[args.num_samples], device=device)
+    Fi0 = torch.as_tensor(all_Fi0[args.init_cond], device=device, dtype=dtype).unsqueeze(0)
+    Gi0 = torch.as_tensor(all_Gi0[args.init_cond], device=device, dtype=dtype).unsqueeze(0)
     loss=0
     with torch.no_grad():  
             for i in tqdm(range(args.num_samples)):
-                rho, ux, uy, E = sod_solver.get_macroscopic(Fi0.squeeze(0), Gi0.squeeze(0))
+                rho, ux, uy, E = sod_solver.get_macroscopic(Fi0, Gi0)
                 T = sod_solver.get_temp_from_energy(ux, uy, E)
                 Feq = sod_solver.get_Feq(rho, ux, uy, T)
-                inputs = torch.stack([rho.unsqueeze(0), ux.unsqueeze(0), uy.unsqueeze(0), T.unsqueeze(0)], dim=1).to(device)
-                Geq_pred = model(inputs, basis)
+                inputs = torch.stack([rho, ux, uy, T], dim=1)
+                Geq_pred_flat = model(inputs, basis)
    
-                Geq_target = torch.tensor(all_Gi0[args.num_samples], device=device).unsqueeze(0)
-
-                inner_lose = loss_func(Geq_pred, Geq_target.permute(0, 2, 3, 1).reshape(-1, 9))
+                if use_exact_macro:
+                    macro_target = torch.stack(
+                        [
+                            exact_rho[args.init_cond + i],
+                            exact_ux[args.init_cond + i],
+                            exact_uy[args.init_cond + i],
+                            exact_T[args.init_cond + i],
+                        ],
+                        dim=0,
+                    ).unsqueeze(0)
+                    macro_pred = torch.stack([rho, ux, uy, T], dim=1)
+                    inner_lose = macro_loss_func(macro_pred, macro_target)
+                else:
+                    Geq_target = torch.as_tensor(all_Geq[args.init_cond + i], device=device, dtype=dtype).unsqueeze(0)
+                    inner_lose = loss_func(Geq_pred_flat, Geq_target.permute(0, 2, 3, 1).reshape(-1, sod_solver.Qn))
                 loss += inner_lose
-                Fi0, Gi0 = sod_solver.collision(Fi0.squeeze(0), Gi0.squeeze(0), Feq, Geq_pred.permute(1, 0).reshape(sod_solver.Qn, sod_solver.Y, sod_solver.X), rho, ux, uy, T)
-                Fi, Gi = sod_solver.streaming(Fi0, Gi0)
-                Fi0 = Fi
-                Gi0 = Gi
+                Geq_pred = Geq_pred_flat.reshape(1, sod_solver.Y, sod_solver.X, sod_solver.Qn).permute(0, 3, 1, 2)
+                Fi0, Gi0 = sod_solver.collision(Fi0, Gi0, Feq, Geq_pred, rho, ux, uy, T)
+                Fi0, Gi0 = sod_solver.streaming(Fi0, Gi0)
 
-
+                rho_plot = rho[0]
+                T_plot = T[0]
+                ux_plot = ux[0]
 
                 plt.figure(figsize=(16, 6))
                 case_number = args.case
@@ -147,25 +178,29 @@ if __name__ == "__main__":
                 linewidth = 5
 
                 plt.subplot(221)
-                plt.plot(detach(rho[2, :]), linewidth=linewidth)
-                plt.plot(all_rho[args.init_cond+i, 2, :], linewidth=2)
+                plt.plot(detach(rho_plot[2, :]), linewidth=linewidth)
+                plt.plot(detach(exact_rho[args.init_cond+i, 2, :]) if use_exact_macro else all_rho[args.init_cond+i, 2, :], linewidth=2)
 
                 plt.title('Density', fontsize=18)  # Slightly increased fontsize
 
                 plt.subplot(222)
-                plt.plot(detach(T[2, :]), linewidth=linewidth)
-                plt.plot((all_T[args.init_cond+i, 2, :]), linewidth=2)
+                plt.plot(detach(T_plot[2, :]), linewidth=linewidth)
+                plt.plot(detach(exact_T[args.init_cond+i, 2, :]) if use_exact_macro else all_T[args.init_cond+i, 2, :], linewidth=2)
                 plt.title('Temperature', fontsize=18)
 
                 plt.subplot(223)
-                plt.plot(detach(ux[2, :]), linewidth=linewidth)
-                plt.plot((all_ux[args.init_cond+i, 2, :]), linewidth=2)
+                plt.plot(detach(ux_plot[2, :]), linewidth=linewidth)
+                plt.plot(detach(exact_ux[args.init_cond+i, 2, :]) if use_exact_macro else all_ux[args.init_cond+i, 2, :], linewidth=2)
                 plt.title('Velocity in x', fontsize=18)
 
                 plt.subplot(224)
-                P = rho * T
+                P = rho_plot * T_plot
                 plt.plot(detach(P[2, :]), linewidth=linewidth)
-                plt.plot((all_P[args.init_cond+i, 2, :]), linewidth=2)
+                if use_exact_macro:
+                    exact_p = exact_rho[args.init_cond+i, 2, :] * exact_T[args.init_cond+i, 2, :]
+                    plt.plot(detach(exact_p), linewidth=2)
+                else:
+                    plt.plot((all_P[args.init_cond+i, 2, :]), linewidth=2)
                 plt.title('Pressure', fontsize=18)
 
  

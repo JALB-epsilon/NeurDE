@@ -7,11 +7,12 @@ from tqdm import tqdm
 import os
 from torch.utils.data import DataLoader
 
-def create_basis(Uax, Uay, device):
+def create_basis(Uax, Uay, device, dtype=torch.float32):
+    dtype = resolve_torch_dtype(dtype)
     ex_values = [1, 0, -1, 0, 1, -1, -1, 1, 0]
     ey_values = [0, 1, 0, -1, 1, 1, -1, -1, 0]
-    ex = torch.tensor(ex_values, dtype=torch.float32) + Uax
-    ey = torch.tensor(ey_values, dtype=torch.float32) + Uay
+    ex = torch.tensor(ex_values, dtype=dtype) + Uax
+    ey = torch.tensor(ey_values, dtype=dtype) + Uay
     basis = torch.stack([ex, ey], dim=-1).to(device)
     return basis
 
@@ -26,10 +27,12 @@ if __name__ == "__main__":
     parser.add_argument('--num_samples', type=int, default=500, help='Number of samples')
     parser.add_argument("--batch_size", type=int, default=32, help='Batch size')
     parser.add_argument("--save_frequency", default=1, help='Save model')
+    parser.add_argument("--dtype", type=str, default="float32", choices=["float32", "float64"])
     parser.set_defaults(save_model=True)
     args = parser.parse_args()
 
     device = get_device(args.device)
+    dtype = resolve_torch_dtype(args.dtype)
 
     with open("cylinder_param.yml", 'r') as stream:
         case_params = yaml.safe_load(stream)
@@ -42,14 +45,21 @@ if __name__ == "__main__":
     os.makedirs(param_training["stage1"]["model_dir"], exist_ok=True)
     all_rho, all_ux, all_uy, all_T, all_Geq = load_equilibrium_state(param_training["data_dir"])
 
-    dataset = CylinderDataset(all_rho[:args.num_samples], all_ux[:args.num_samples], all_uy[:args.num_samples], all_T[:args.num_samples], all_Geq[:args.num_samples])
+    dataset = CylinderDataset(
+        all_rho[:args.num_samples],
+        all_ux[:args.num_samples],
+        all_uy[:args.num_samples],
+        all_T[:args.num_samples],
+        all_Geq[:args.num_samples],
+        dtype=dtype,
+    )
     dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True, num_workers=4, pin_memory=True)
 
     model = NeurDE(
         alpha_layer=[4] + [param_training["hidden_dim"]] * param_training["num_layers"],
         branch_layer=[2] + [param_training["hidden_dim"]] * param_training["num_layers"],
         activation='relu'
-    ).to(device)
+    ).to(device=device, dtype=dtype)
 
 
     if args.compile:
@@ -70,7 +80,7 @@ if __name__ == "__main__":
     U0 = case_params["Ma0"] * cs0
     Uax = U0 * case_params["Ns"]
     Uay = 0
-    basis = create_basis(Uax, Uay, device)
+    basis = create_basis(Uax, Uay, device, dtype=dtype)
 
 
     epochs = param_training["stage1"]["epochs"]

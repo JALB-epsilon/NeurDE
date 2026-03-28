@@ -8,7 +8,14 @@ import torch
 import yaml
 
 from architectures import NeurDE
-from burgers_solver import BurgersSolver, default_config_path, resolve_config_path, resolve_module_path, resolve_stabilizer_kwargs
+from burgers_solver import (
+    BurgersSolver,
+    default_config_path,
+    resolve_config_path,
+    resolve_module_path,
+    resolve_stabilizer_kwargs,
+    resolve_torch_dtype,
+)
 
 
 def compute_split_index(total_steps, train_fraction):
@@ -82,7 +89,9 @@ def main():
     parser.add_argument("--start_step", type=int, default=None)
     parser.add_argument("--plot_every", type=int, default=0, help="Save rollout overlay plots every N steps (0 disables periodic plots).")
     parser.add_argument("--plot_steps", type=str, default="", help="Comma-separated global rollout steps to save explicitly, e.g. 610,620.")
+    parser.add_argument("--dtype", type=str, default="float32", choices=["float32", "float64"])
     args = parser.parse_args()
+    dtype = resolve_torch_dtype(args.dtype)
 
     config_path = resolve_config_path(args.config)
     with open(config_path, "r") as stream:
@@ -103,7 +112,7 @@ def main():
             default_start = compute_split_index(limit, args.train_fraction)
         start_step = default_start if args.start_step is None else max(0, min(args.start_step, limit - 1))
         end_step = limit if args.steps is None else min(limit, start_step + args.steps)
-        u_ref = torch.tensor(handle["u"][start_step:end_step], dtype=torch.float32)
+        u_ref = torch.as_tensor(handle["u"][start_step:end_step], dtype=dtype)
         if u_ref.shape[0] == 0:
             raise ValueError("Evaluation slice is empty; adjust train_fraction/start_step/steps.")
 
@@ -124,6 +133,7 @@ def main():
         boundary=config.get("boundary", "outflow"),
         u_left_bc=config.get("u_left"),
         u_right_bc=config.get("u_right"),
+        dtype=dtype,
         **resolve_stabilizer_kwargs(config),
     )
     model = NeurDE(
@@ -134,12 +144,12 @@ def main():
         learn_geq=False,
         logit_clip=config.get("logit_clip", 15.0),
         conservative_output=conservative_output,
-    ).to(device)
+    ).to(device=device, dtype=dtype)
     model.load_state_dict(torch.load(model_path, map_location=device))
     model.eval()
 
-    basis = solver.basis().to(device)
-    F = solver.equilibrium(u_ref[0].to(device))
+    basis = solver.basis().to(device=device, dtype=dtype)
+    F = solver.equilibrium(u_ref[0].to(device).unsqueeze(0))
 
     x = solver.x_grid()
     model_stem = os.path.splitext(os.path.basename(model_path))[0]
@@ -163,18 +173,18 @@ def main():
                 failure_step = step
                 break
             max_abs_u = max(max_abs_u, float(u.detach().abs().max().item()))
-            inputs = u.unsqueeze(0).unsqueeze(0).unsqueeze(1)
-            Feq_pred = model(inputs, basis).permute(1, 0)
+            inputs = u.unsqueeze(1).unsqueeze(2)
+            Feq_pred = model(inputs, basis).reshape(1, solver.X, solver.Qn).permute(0, 2, 1)
             if not torch.isfinite(Feq_pred).all():
                 failure_step = step
                 break
             F, _, _ = solver.step(F, Feq_pred)
-            target = u_ref[step].to(device)
+            target = u_ref[step].to(device).unsqueeze(0)
             step_rel = (torch.norm(u - target) / (torch.norm(target) + 1e-7)).item()
             rel_error += step_rel
             rel_errors.append(step_rel)
-            plotted_u = u.detach().cpu()
-            plotted_target = target.detach().cpu()
+            plotted_u = u[0].detach().cpu()
+            plotted_target = target[0].detach().cpu()
             plotted_step = global_step
             plotted_time = global_step * solver.dt
             should_plot = (

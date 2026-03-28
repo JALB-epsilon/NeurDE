@@ -7,7 +7,14 @@ import yaml
 from torch.utils.data import DataLoader, TensorDataset
 
 from architectures import NeurDE
-from burgers_solver import BurgersSolver, default_config_path, resolve_config_path, resolve_module_path, resolve_stabilizer_kwargs
+from burgers_solver import (
+    BurgersSolver,
+    default_config_path,
+    resolve_config_path,
+    resolve_module_path,
+    resolve_stabilizer_kwargs,
+    resolve_torch_dtype,
+)
 
 
 def compute_split_index(total_steps, train_fraction):
@@ -23,7 +30,9 @@ def main():
     parser.add_argument("--train_fraction", type=float, default=0.5)
     parser.add_argument("--train_count", type=int, default=None)
     parser.add_argument("--epochs_override", type=int, default=None)
+    parser.add_argument("--dtype", type=str, default="float32", choices=["float32", "float64"])
     args = parser.parse_args()
+    dtype = resolve_torch_dtype(args.dtype)
 
     config_path = resolve_config_path(args.config)
     with open(config_path, "r") as stream:
@@ -40,8 +49,8 @@ def main():
             split_idx = max(1, min(int(args.train_count), limit))
         else:
             split_idx = compute_split_index(limit, args.train_fraction)
-        u = torch.tensor(handle["u"][:split_idx], dtype=torch.float32)
-        feq = torch.tensor(handle["Feq"][:split_idx], dtype=torch.float32)
+        u = torch.as_tensor(handle["u"][:split_idx], dtype=dtype)
+        feq = torch.as_tensor(handle["Feq"][:split_idx], dtype=dtype)
 
     dataset = TensorDataset(u, feq)
     dataloader = DataLoader(
@@ -66,6 +75,7 @@ def main():
         boundary=config.get("boundary", "outflow"),
         u_left_bc=config.get("u_left"),
         u_right_bc=config.get("u_right"),
+        dtype=dtype,
         **resolve_stabilizer_kwargs(config),
     )
 
@@ -77,9 +87,9 @@ def main():
         learn_geq=False,
         logit_clip=config.get("logit_clip", 15.0),
         conservative_output=conservative_output,
-    ).to(device)
+    ).to(device=device, dtype=dtype)
 
-    basis = solver.basis().to(device)
+    basis = solver.basis().to(device=device, dtype=dtype)
     optimizer = torch.optim.Adam(model.parameters(), lr=config["train"]["lr"])
 
     os.makedirs(results_dir, exist_ok=True)
