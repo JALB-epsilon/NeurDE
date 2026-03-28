@@ -5,3 +5,11 @@ Cylinder/torch_solver_not_working/*
 *.pt
 SOD_shock_tube/experiments_ant_check_code.py
 SOD_shock_tube/Sod_cases_param_training.yml
+
+# Generated data, checkpoints, images, and scratch-backed symlinks
+**/data_base
+**/data_workspace
+**/results
+**/results_d2q9
+**/results_d2q9_sinusoidal
+**/images
