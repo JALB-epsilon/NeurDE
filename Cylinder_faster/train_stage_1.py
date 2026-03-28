@@ -6,6 +6,7 @@ import yaml
 from tqdm import tqdm
 import os
 from torch.utils.data import DataLoader
+from cylinder_solver import Cylinder_base
 
 def create_basis(Uax, Uay, device, dtype=torch.float32):
     dtype = resolve_torch_dtype(dtype)
@@ -37,6 +38,24 @@ if __name__ == "__main__":
     with open("cylinder_param.yml", 'r') as stream:
         case_params = yaml.safe_load(stream)
     case_params['device'] = device
+
+    cylinder_solver = Cylinder_base(
+        X=case_params['X'],
+        Y=case_params['Y'],
+        Qn=case_params['Qn'],
+        radius=case_params['radius'],
+        Ma0=case_params['Ma0'],
+        Re=case_params['Re'],
+        rho0=case_params['rho0'],
+        T0=case_params['T0'],
+        alpha1=case_params['alpha1'],
+        alpha01=case_params['alpha01'],
+        vuy=case_params['vuy'],
+        Pr=case_params['Pr'],
+        Ns=case_params['Ns'],
+        device=device,
+        dtype=dtype,
+    )
 
     with open("cylinder_param_training.yml", 'r') as stream:
         param_training = yaml.safe_load(stream)
@@ -70,8 +89,6 @@ if __name__ == "__main__":
         geq_mode=model_config["geq_mode"],
         cv=1.0 / (case_params["vuy"] - 1.0),
         logit_clip=model_config["logit_clip"],
-        feq_base_measure=model_config["feq_base_measure"],
-        geq_base_measure=model_config["geq_base_measure"],
         newton_iters=model_config["newton_iters"],
         newton_tolerance=model_config["newton_tolerance"],
     ).to(device=device, dtype=dtype)
@@ -118,11 +135,30 @@ if __name__ == "__main__":
     for epoch in tqdm(range(epochs), desc="Epochs"):
         loss_epoch = 0
         for rho_batch, ux_batch, uy_batch, T_batch, Feq_batch, Geq_batch in dataloader:
-            input_data = torch.stack([rho_batch, ux_batch, uy_batch, T_batch], dim=1).to(device)
+            rho_batch = rho_batch.to(device=device, dtype=dtype)
+            ux_batch = ux_batch.to(device=device, dtype=dtype)
+            uy_batch = uy_batch.to(device=device, dtype=dtype)
+            T_batch = T_batch.to(device=device, dtype=dtype)
+            input_data = torch.stack([rho_batch, ux_batch, uy_batch, T_batch], dim=1)
             target_batch = Feq_batch if supervision_mode == "feq" else Geq_batch
-            targets = target_batch.permute(0, 2, 3, 1).reshape(-1, 9).to(device)
+            targets = target_batch.permute(0, 2, 3, 1).reshape(-1, 9).to(device=device, dtype=dtype)
+            model_kwargs = {}
+            with torch.no_grad():
+                if supervision_mode == "geq" and model_config["geq_mode"] == "constrained":
+                    khi0 = torch.zeros_like(rho_batch)
+                    zetax0 = torch.zeros_like(rho_batch)
+                    zetay0 = torch.zeros_like(rho_batch)
+                    model_kwargs["geq_base"], _, _, _ = cylinder_solver.get_Geq_Newton_solver(
+                        rho_batch,
+                        ux_batch,
+                        uy_batch,
+                        T_batch,
+                        khi0,
+                        zetax0,
+                        zetay0,
+                    )
             optimizer.zero_grad()
-            equilibrium_pred = model(input_data, basis)
+            equilibrium_pred = model(input_data, basis, **model_kwargs)
             loss = loss_func(equilibrium_pred, targets)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)

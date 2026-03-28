@@ -4,8 +4,6 @@ data_dir: data_base/cylinder_case.h5
 model:
   feq_mode: positive
   geq_mode: positive
-  feq_base_measure: d2q9
-  geq_base_measure: d2q9
   logit_clip: 15.0
   newton_iters: 20
   newton_tolerance: 1.0e-6

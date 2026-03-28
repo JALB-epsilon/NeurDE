@@ -68,6 +68,10 @@ if __name__ == "__main__":
     number_of_rollout = param_training["stage2"]["N"]
     supervision_mode = str(param_training["stage2"].get("supervision", "geq")).lower()
     learn_target = resolve_stage_target(param_training["stage2"])
+    use_analytic_feq = learn_target == "geq"
+    use_analytic_geq = learn_target == "feq"
+    needs_model_feq_base = False
+    needs_model_geq_base = learn_target == "geq" and model_config["geq_mode"] == "constrained"
 
     os.makedirs(param_training["stage2"]["model_dir"], exist_ok=True)
     all_F, all_G, all_Feq, all_Geq = load_data_stage_2(param_training["data_dir"])
@@ -82,8 +86,6 @@ if __name__ == "__main__":
         geq_mode=model_config["geq_mode"],
         cv=1.0 / (case_params["vuy"] - 1.0),
         logit_clip=model_config["logit_clip"],
-        feq_base_measure=model_config["feq_base_measure"],
-        geq_base_measure=model_config["geq_base_measure"],
         newton_iters=model_config["newton_iters"],
         newton_tolerance=model_config["newton_tolerance"],
     ).to(device=device, dtype=dtype)
@@ -150,7 +152,30 @@ if __name__ == "__main__":
                 rho, ux, uy, E = cylinder_solver.get_macroscopic(Fi0, Gi0)
                 T = cylinder_solver.get_temp_from_energy(ux, uy, E)
                 inputs = torch.stack([rho, ux, uy, T], dim=1)
-                equilibrium_pred_flat = model(inputs, basis)
+                Feq_base = None
+                Geq_base = None
+                if use_analytic_feq or needs_model_feq_base:
+                    Feq_base = cylinder_solver.get_Feq(rho, ux, uy, T)
+                if use_analytic_geq or needs_model_geq_base:
+                    if khi is None:
+                        khi = torch.zeros_like(ux)
+                        zetax = torch.zeros_like(ux)
+                        zetay = torch.zeros_like(ux)
+                    Geq_base, khi, zetax, zetay = cylinder_solver.get_Geq_Newton_solver(
+                        rho,
+                        ux,
+                        uy,
+                        T,
+                        khi,
+                        zetax,
+                        zetay,
+                    )
+                equilibrium_pred_flat = model(
+                    inputs,
+                    basis,
+                    feq_base=Feq_base if needs_model_feq_base else None,
+                    geq_base=Geq_base if needs_model_geq_base else None,
+                )
    
                 if supervision_mode == "feq":
                     equilibrium_target = torch.as_tensor(all_Feq[args.init_cond + i], device=device, dtype=dtype).unsqueeze(0)
@@ -160,15 +185,11 @@ if __name__ == "__main__":
                 loss += inner_lose
                 equilibrium_pred = equilibrium_pred_flat.reshape(1, cylinder_solver.Y, cylinder_solver.X, cylinder_solver.Qn).permute(0, 3, 1, 2)
                 if learn_target == "geq":
-                    Feq = cylinder_solver.get_Feq(rho, ux, uy, T)
+                    Feq = Feq_base
                     Geq = equilibrium_pred
                 else:
                     Feq = equilibrium_pred
-                    if khi is None:
-                        khi = torch.zeros_like(ux)
-                        zetax = torch.zeros_like(ux)
-                        zetay = torch.zeros_like(ux)
-                    Geq, khi, zetax, zetay = cylinder_solver.get_Geq_Newton_solver(rho, ux, uy, T, khi, zetax, zetay)
+                    Geq = Geq_base
                 Fi0, Gi0 = cylinder_solver.collision(Fi0, Gi0, Feq, Geq, rho, ux, uy, T)
                 Fi, Gi = cylinder_solver.streaming(Fi0, Gi0)
                 if args.with_obs:

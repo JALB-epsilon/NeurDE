@@ -31,6 +31,35 @@ def _project_to_nonconserved(logits, moment_matrix):
     return logits @ projector.transpose(0, 1)
 
 
+def _flatten_population(population):
+    if population.ndim == 4:
+        return population.permute(0, 2, 3, 1).reshape(-1, population.shape[1])
+    if population.ndim == 3:
+        return population.permute(1, 2, 0).reshape(-1, population.shape[0])
+    if population.ndim == 2:
+        return population
+    raise ValueError(f"Unsupported population tensor rank: {population.ndim}")
+
+
+def _levermore_weights_from_temperature(T_flat, q_count):
+    T_flat = T_flat.clamp(min=1e-6, max=1.0 - 1e-6)
+    weights = torch.zeros((T_flat.shape[0], q_count), device=T_flat.device, dtype=T_flat.dtype)
+    if q_count == 0:
+        return weights
+
+    one_minus_T = 1.0 - T_flat
+    if q_count >= 9:
+        weights[:, :4] = ((one_minus_T * T_flat) * 0.5).unsqueeze(-1).expand(-1, 4)
+        weights[:, 4:8] = ((T_flat * T_flat) * 0.25).unsqueeze(-1).expand(-1, 4)
+        weights[:, 8] = one_minus_T * one_minus_T
+        if q_count > 9:
+            weights[:, 9:] = 0.1
+    else:
+        count = min(4, q_count)
+        weights[:, :count] = ((one_minus_T * T_flat) * 0.5).unsqueeze(-1).expand(-1, count)
+    return weights
+
+
 def _feq_targets(flat_macro_state):
     rho = flat_macro_state[:, 0]
     ux = flat_macro_state[:, 1]
@@ -53,19 +82,6 @@ def _geq_targets(flat_macro_state, cv):
             2.0 * rho * uy * enthalpy,
         ],
         dim=-1,
-    )
-
-
-def _base_measure(q_count, device, dtype, mode):
-    mode = str(mode).lower()
-    if mode != "d2q9":
-        raise ValueError(f"Unsupported base measure mode: {mode}")
-    if q_count != 9:
-        raise ValueError(f"d2q9 base measure only supports 9 populations, got {q_count}")
-    return torch.tensor(
-        [1.0 / 9.0] * 4 + [1.0 / 36.0] * 4 + [4.0 / 9.0],
-        device=device,
-        dtype=dtype,
     )
 
 
@@ -123,6 +139,15 @@ def _solve_conserved_multipliers(
     return population
 
 
+def _zero_last_linear(dense_net):
+    for layer in reversed(dense_net.layers):
+        if isinstance(layer, nn.Linear):
+            nn.init.zeros_(layer.weight)
+            nn.init.zeros_(layer.bias)
+            return
+    raise RuntimeError("DenseNet does not contain a linear layer to initialize.")
+
+
 class EquilibriumHead(nn.Module):
     def __init__(
         self,
@@ -133,7 +158,6 @@ class EquilibriumHead(nn.Module):
         constraint_kind="geq",
         cv=None,
         logit_clip=15.0,
-        base_measure="d2q9",
         newton_iters=20,
         newton_tolerance=1e-6,
     ):
@@ -144,7 +168,6 @@ class EquilibriumHead(nn.Module):
         self.constraint_kind = str(constraint_kind).lower()
         self.cv = cv
         self.logit_clip = logit_clip
-        self.base_measure = str(base_measure).lower()
         self.newton_iters = int(newton_iters)
         self.newton_tolerance = float(newton_tolerance)
 
@@ -154,8 +177,10 @@ class EquilibriumHead(nn.Module):
             raise ValueError(f"Unsupported constraint kind: {constraint_kind}")
         if self.constraint_kind == "geq" and self.cv is None:
             raise ValueError("cv is required for constrained Geq heads.")
+        if self.mode == "constrained":
+            _zero_last_linear(self.alpha)
 
-    def forward(self, macro_state, basis):
+    def forward(self, macro_state, basis, base_population=None):
         logits, flat_macro_state = _compute_logits(
             self.alpha,
             self.phi,
@@ -166,16 +191,28 @@ class EquilibriumHead(nn.Module):
         if self.mode == "positive":
             return torch.exp(logits)
 
-        moment_matrix = _build_moment_matrix(basis)
-        nonconserved_logits = _project_to_nonconserved(logits, moment_matrix)
-        log_base = torch.log(
-            _base_measure(
-                basis.shape[0],
+        if self.constraint_kind == "feq":
+            base_flat = _levermore_weights_from_temperature(
+                flat_macro_state[:, 3],
+                logits.shape[1],
+            )
+        elif base_population is None:
+            raise ValueError(
+                f"Constrained {self.constraint_kind} head requires a baseline population."
+            )
+        else:
+            base_flat = _flatten_population(base_population).to(
                 device=logits.device,
                 dtype=logits.dtype,
-                mode=self.base_measure,
             )
-        ).unsqueeze(0) + nonconserved_logits
+        if base_flat.shape != logits.shape:
+            raise ValueError(
+                f"Baseline population shape {base_flat.shape} does not match logits shape {logits.shape}."
+            )
+
+        moment_matrix = _build_moment_matrix(basis)
+        nonconserved_logits = _project_to_nonconserved(logits, moment_matrix)
+        log_base = torch.log(base_flat.clamp_min(1e-12)) + nonconserved_logits
         if self.constraint_kind == "feq":
             target_moments = _feq_targets(flat_macro_state)
         else:
@@ -202,8 +239,6 @@ class NeurDE(nn.Module):
         geq_mode="positive",
         cv=None,
         logit_clip=15.0,
-        feq_base_measure="d2q9",
-        geq_base_measure="d2q9",
         newton_iters=20,
         newton_tolerance=1e-6,
     ):
@@ -221,7 +256,6 @@ class NeurDE(nn.Module):
                 constraint_kind="feq",
                 cv=cv,
                 logit_clip=logit_clip,
-                base_measure=feq_base_measure,
                 newton_iters=newton_iters,
                 newton_tolerance=newton_tolerance,
             )
@@ -237,7 +271,6 @@ class NeurDE(nn.Module):
                 constraint_kind="geq",
                 cv=cv,
                 logit_clip=logit_clip,
-                base_measure=geq_base_measure,
                 newton_iters=newton_iters,
                 newton_tolerance=newton_tolerance,
             )
@@ -245,9 +278,17 @@ class NeurDE(nn.Module):
             else None
         )
 
-    def forward(self, macro_state, basis):
-        feq = self.feq_head(macro_state, basis) if self.feq_head is not None else None
-        geq = self.geq_head(macro_state, basis) if self.geq_head is not None else None
+    def forward(self, macro_state, basis, feq_base=None, geq_base=None):
+        feq = (
+            self.feq_head(macro_state, basis, base_population=feq_base)
+            if self.feq_head is not None
+            else None
+        )
+        geq = (
+            self.geq_head(macro_state, basis, base_population=geq_base)
+            if self.geq_head is not None
+            else None
+        )
         if feq is not None and geq is not None:
             return feq, geq
         if feq is not None:

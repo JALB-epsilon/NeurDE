@@ -23,6 +23,11 @@ if __name__ == "__main__":
     parser.add_argument("--init_cond",  type=int, default=500, help='Number of samples')
     parser.add_argument("--save_frequency", default=50, help='Save model')
     parser.add_argument("--trained_path", type=str, default=None)
+    parser.add_argument("--supervision_override", type=str, default=None)
+    parser.add_argument("--learn_target_override", type=str, default=None)
+    parser.add_argument("--feq_mode_override", type=str, default=None)
+    parser.add_argument("--geq_mode_override", type=str, default=None)
+    parser.add_argument("--no_plots", action="store_true", help="Skip per-step plots")
     parser.add_argument("--dtype", type=str, default="float32", choices=["float32", "float64"])
     parser.set_defaults(save_model=True)
     args = parser.parse_args()
@@ -64,10 +69,22 @@ if __name__ == "__main__":
     with open("Sod_cases_param_training.yml", 'r') as stream:
         training_config = yaml.safe_load(stream)
     param_training = training_config[args.case]
+    if args.supervision_override is not None:
+        param_training["stage2"]["supervision"] = str(args.supervision_override)
+    if args.learn_target_override is not None:
+        param_training["stage2"]["learn_target"] = str(args.learn_target_override)
+    if args.feq_mode_override is not None:
+        param_training.setdefault("model", {})["feq_mode"] = str(args.feq_mode_override)
+    if args.geq_mode_override is not None:
+        param_training.setdefault("model", {})["geq_mode"] = str(args.geq_mode_override)
     model_config = get_model_config(param_training)
     number_of_rollout = param_training["stage2"]["N"]
     supervision_mode = param_training["stage2"].get("supervision", "geq").lower()
     learn_target = resolve_stage_target(param_training["stage2"])
+    use_analytic_feq = learn_target == "geq"
+    use_analytic_geq = learn_target == "feq"
+    needs_model_feq_base = False
+    needs_model_geq_base = learn_target in {"geq", "both"} and model_config["geq_mode"] == "constrained"
 
     os.makedirs(param_training["stage2"]["model_dir"], exist_ok=True)
     all_F, all_G, all_Feq, all_Geq = load_data_stage_2(param_training["data_dir"])
@@ -76,14 +93,12 @@ if __name__ == "__main__":
         alpha_layer=[4] + [param_training["hidden_dim"]] * param_training["num_layers"],
         phi_layer=[2] + [param_training["hidden_dim"]] * param_training["num_layers"],
         activation='relu',
-        learn_feq=learn_target == "feq",
-        learn_geq=learn_target == "geq",
+        learn_feq=learn_target in {"feq", "both"},
+        learn_geq=learn_target in {"geq", "both"},
         feq_mode=model_config["feq_mode"],
         geq_mode=model_config["geq_mode"],
         cv=1.0 / (case_params["vuy"] - 1.0),
         logit_clip=model_config["logit_clip"],
-        feq_base_measure=model_config["feq_base_measure"],
-        geq_base_measure=model_config["geq_base_measure"],
         newton_iters=model_config["newton_iters"],
         newton_tolerance=model_config["newton_tolerance"],
     ).to(device=device, dtype=dtype)
@@ -149,7 +164,8 @@ if __name__ == "__main__":
 
     Fi0 = torch.as_tensor(all_Fi0[args.init_cond], device=device, dtype=dtype).unsqueeze(0)
     Gi0 = torch.as_tensor(all_Gi0[args.init_cond], device=device, dtype=dtype).unsqueeze(0)
-    loss=0
+    loss = 0.0
+    loss_history = []
     khi = None
     zetax = None
     zetay = None
@@ -158,44 +174,84 @@ if __name__ == "__main__":
                 rho, ux, uy, E = sod_solver.get_macroscopic(Fi0, Gi0)
                 T = sod_solver.get_temp_from_energy(ux, uy, E)
                 inputs = torch.stack([rho, ux, uy, T], dim=1)
-                equilibrium_pred_flat = model(inputs, basis)
-   
-                if use_exact_macro:
-                    macro_target = torch.stack(
-                        [
-                            exact_rho[args.init_cond + i],
-                            exact_ux[args.init_cond + i],
-                            exact_uy[args.init_cond + i],
-                            exact_T[args.init_cond + i],
-                        ],
-                        dim=0,
-                    ).unsqueeze(0)
-                    macro_pred = torch.stack([rho, ux, uy, T], dim=1)
-                    inner_lose = macro_loss_func(macro_pred, macro_target)
-                elif supervision_mode == "feq":
-                    Feq_target = torch.as_tensor(all_Feq[args.init_cond + i], device=device, dtype=dtype).unsqueeze(0)
-                    inner_lose = loss_func(equilibrium_pred_flat, Feq_target.permute(0, 2, 3, 1).reshape(-1, sod_solver.Qn))
-                else:
-                    Geq_target = torch.as_tensor(all_Geq[args.init_cond + i], device=device, dtype=dtype).unsqueeze(0)
-                    inner_lose = loss_func(equilibrium_pred_flat, Geq_target.permute(0, 2, 3, 1).reshape(-1, sod_solver.Qn))
-                loss += inner_lose
-                equilibrium_pred = equilibrium_pred_flat.reshape(1, sod_solver.Y, sod_solver.X, sod_solver.Qn).permute(0, 3, 1, 2)
-                if learn_target == "geq":
-                    Feq = sod_solver.get_Feq(rho, ux, uy, T)
-                    Geq = equilibrium_pred
-                else:
-                    Feq = equilibrium_pred
+                Feq_base = None
+                Geq_base = None
+                if use_analytic_feq or needs_model_feq_base:
+                    Feq_base = sod_solver.get_Feq(rho, ux, uy, T)
+                if use_analytic_geq or needs_model_geq_base:
                     if khi is None:
                         khi = torch.zeros_like(ux)
                         zetax = torch.zeros_like(ux)
                         zetay = torch.zeros_like(ux)
-                    Geq, khi, zetax, zetay = sod_solver.get_Geq_Newton_solver(rho, ux, uy, T, khi, zetax, zetay)
-                Fi0, Gi0 = sod_solver.collision(Fi0, Gi0, Feq, Geq, rho, ux, uy, T)
-                Fi0, Gi0 = sod_solver.streaming(Fi0, Gi0)
+                    Geq_base, khi, zetax, zetay = sod_solver.get_Geq_Newton_solver(
+                        rho,
+                        ux,
+                        uy,
+                        T,
+                        khi,
+                        zetax,
+                        zetay,
+                    )
+                equilibrium_pred = model(
+                    inputs,
+                    basis,
+                    feq_base=Feq_base if needs_model_feq_base else None,
+                    geq_base=Geq_base if needs_model_geq_base else None,
+                )
+                if learn_target == "both":
+                    Feq_pred_flat, Geq_pred_flat = equilibrium_pred
+                    Feq = Feq_pred_flat.reshape(1, sod_solver.Y, sod_solver.X, sod_solver.Qn).permute(0, 3, 1, 2)
+                    Geq = Geq_pred_flat.reshape(1, sod_solver.Y, sod_solver.X, sod_solver.Qn).permute(0, 3, 1, 2)
+                else:
+                    equilibrium_pred_flat = equilibrium_pred
+                    equilibrium_pred = equilibrium_pred_flat.reshape(1, sod_solver.Y, sod_solver.X, sod_solver.Qn).permute(0, 3, 1, 2)
+                    if learn_target == "geq":
+                        Feq = Feq_base
+                        Geq = equilibrium_pred
+                    else:
+                        Feq = equilibrium_pred
+                        Geq = Geq_base
+                Fi_next, Gi_next = sod_solver.collision(Fi0, Gi0, Feq, Geq, rho, ux, uy, T)
+                Fi_next, Gi_next = sod_solver.streaming(Fi_next, Gi_next)
 
-                rho_plot = rho[0]
-                T_plot = T[0]
-                ux_plot = ux[0]
+                if use_exact_macro:
+                    rho_next, ux_next, uy_next, E_next = sod_solver.get_macroscopic(Fi_next, Gi_next)
+                    T_next = sod_solver.get_temp_from_energy(ux_next, uy_next, E_next)
+                    target_index = args.init_cond + i + 1
+                    macro_target = torch.stack(
+                        [
+                            exact_rho[target_index],
+                            exact_ux[target_index],
+                            exact_uy[target_index],
+                            exact_T[target_index],
+                        ],
+                        dim=0,
+                    ).unsqueeze(0)
+                    macro_pred = torch.stack([rho_next, ux_next, uy_next, T_next], dim=1)
+                    inner_lose = macro_loss_func(macro_pred, macro_target)
+                    rho_plot = rho_next[0]
+                    T_plot = T_next[0]
+                    ux_plot = ux_next[0]
+                elif supervision_mode == "feq":
+                    Feq_target = torch.as_tensor(all_Feq[args.init_cond + i], device=device, dtype=dtype).unsqueeze(0)
+                    pred_flat = Feq_pred_flat if learn_target == "both" else equilibrium_pred_flat
+                    inner_lose = loss_func(pred_flat, Feq_target.permute(0, 2, 3, 1).reshape(-1, sod_solver.Qn))
+                    rho_plot = rho[0]
+                    T_plot = T[0]
+                    ux_plot = ux[0]
+                else:
+                    Geq_target = torch.as_tensor(all_Geq[args.init_cond + i], device=device, dtype=dtype).unsqueeze(0)
+                    pred_flat = Geq_pred_flat if learn_target == "both" else equilibrium_pred_flat
+                    inner_lose = loss_func(pred_flat, Geq_target.permute(0, 2, 3, 1).reshape(-1, sod_solver.Qn))
+                    rho_plot = rho[0]
+                    T_plot = T[0]
+                    ux_plot = ux[0]
+                loss += float(inner_lose)
+                loss_history.append(float(inner_lose))
+                Fi0, Gi0 = Fi_next, Gi_next
+
+                if args.no_plots:
+                    continue
 
                 plt.figure(figsize=(16, 6))
                 case_number = args.case
@@ -206,25 +262,25 @@ if __name__ == "__main__":
 
                 plt.subplot(221)
                 plt.plot(detach(rho_plot[2, :]), linewidth=linewidth)
-                plt.plot(detach(exact_rho[args.init_cond+i, 2, :]) if use_exact_macro else all_rho[args.init_cond+i, 2, :], linewidth=2)
+                plt.plot(detach(exact_rho[args.init_cond+i+1, 2, :]) if use_exact_macro else all_rho[args.init_cond+i, 2, :], linewidth=2)
 
                 plt.title('Density', fontsize=18)  # Slightly increased fontsize
 
                 plt.subplot(222)
                 plt.plot(detach(T_plot[2, :]), linewidth=linewidth)
-                plt.plot(detach(exact_T[args.init_cond+i, 2, :]) if use_exact_macro else all_T[args.init_cond+i, 2, :], linewidth=2)
+                plt.plot(detach(exact_T[args.init_cond+i+1, 2, :]) if use_exact_macro else all_T[args.init_cond+i, 2, :], linewidth=2)
                 plt.title('Temperature', fontsize=18)
 
                 plt.subplot(223)
                 plt.plot(detach(ux_plot[2, :]), linewidth=linewidth)
-                plt.plot(detach(exact_ux[args.init_cond+i, 2, :]) if use_exact_macro else all_ux[args.init_cond+i, 2, :], linewidth=2)
+                plt.plot(detach(exact_ux[args.init_cond+i+1, 2, :]) if use_exact_macro else all_ux[args.init_cond+i, 2, :], linewidth=2)
                 plt.title('Velocity in x', fontsize=18)
 
                 plt.subplot(224)
                 P = rho_plot * T_plot
                 plt.plot(detach(P[2, :]), linewidth=linewidth)
                 if use_exact_macro:
-                    exact_p = exact_rho[args.init_cond+i, 2, :] * exact_T[args.init_cond+i, 2, :]
+                    exact_p = exact_rho[args.init_cond+i+1, 2, :] * exact_T[args.init_cond+i+1, 2, :]
                     plt.plot(detach(exact_p), linewidth=2)
                 else:
                     plt.plot((all_P[args.init_cond+i, 2, :]), linewidth=2)
@@ -234,7 +290,10 @@ if __name__ == "__main__":
                 # Reduced whitespace - Key changes here:
                 plt.tight_layout(rect=[0, 0, 1, 0.95], h_pad=0.35, w_pad=0.35)  
 
-                image_dir = os.path.join(f'images/ SOD_case{case_number}/test_NN')
+                image_dir = os.path.join("images", f"SOD_case{case_number}", "test_NN")
                 os.makedirs(image_dir, exist_ok=True)
                 plt.savefig(os.path.join(image_dir, f'SOD_case{case_number}_{i+args.init_cond}.png'))
                 plt.close()
+    if args.num_samples > 0:
+        print(f"Average rollout loss: {loss / args.num_samples:.6f}")
+        print(f"Last rollout loss: {loss_history[-1]:.6f}")

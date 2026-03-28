@@ -107,8 +107,6 @@ def get_model_config(config):
     return {
         "feq_mode": str(model_config.get("feq_mode", "positive")).lower(),
         "geq_mode": str(model_config.get("geq_mode", "positive")).lower(),
-        "feq_base_measure": str(model_config.get("feq_base_measure", "d2q9")).lower(),
-        "geq_base_measure": str(model_config.get("geq_base_measure", "d2q9")).lower(),
         "logit_clip": model_config.get("logit_clip", 15.0),
         "newton_iters": int(model_config.get("newton_iters", 20)),
         "newton_tolerance": float(model_config.get("newton_tolerance", 1e-6)),

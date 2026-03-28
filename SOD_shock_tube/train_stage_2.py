@@ -16,13 +16,24 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser(description='Train Stage 2')
     parser.add_argument('--device', type=int, default=3, help='Device index')
+    parser.add_argument('--case', type=int, choices=[1, 2], default=None, help='Case 1 or 2')
     parser.add_argument("--compile", dest='compile', action='store_true', help='Compile', default=False)
     parser.add_argument('--save_model', action='store_true', help='Save model checkpoints (enabled by default)')
     parser.add_argument('--no_save_model', dest='save_model', action='store_false', help='Disable model checkpoint saving')
     parser.add_argument('--num_samples', type=int, default=500, help='Number of samples')
-    parser.add_argument("--save_frequency", default=1, help='Save model')
+    parser.add_argument("--save_frequency", type=int, default=1, help='Save model')
     parser.add_argument("--TVD", dest='TVD', action='store_true', help='TVD norm', default=False)
+    parser.add_argument("--disable_tvd", action='store_true', help='Disable TVD even if enabled in the YAML')
     parser.add_argument("--pre_trained_path", type=str, default=None)
+    parser.add_argument("--epochs_override", type=int, default=None)
+    parser.add_argument("--rollout_override", type=int, default=None)
+    parser.add_argument("--supervision_override", type=str, default=None)
+    parser.add_argument("--learn_target_override", type=str, default=None)
+    parser.add_argument("--model_dir_override", type=str, default=None)
+    parser.add_argument("--batch_size_override", type=int, default=None)
+    parser.add_argument("--lr_override", type=float, default=None)
+    parser.add_argument("--feq_mode_override", type=str, default=None)
+    parser.add_argument("--geq_mode_override", type=str, default=None)
     parser.add_argument("--dtype", type=str, default="float32", choices=["float32", "float64"])
     parser.set_defaults(save_model=True)
     args = parser.parse_args()
@@ -37,7 +48,7 @@ if __name__ == "__main__":
         args.case = int(case_number)
         print(args.case)
 
-    else: 
+    elif args.case is None:
         args.case = 1
 
     with open("Sod_cases_param.yml", 'r') as stream:
@@ -65,14 +76,38 @@ if __name__ == "__main__":
     with open("Sod_cases_param_training.yml", 'r') as stream:
         training_config = yaml.safe_load(stream)
     param_training = training_config[args.case]
+    if args.rollout_override is not None:
+        param_training["stage2"]["N"] = int(args.rollout_override)
+    if args.epochs_override is not None:
+        param_training["stage2"]["epochs"] = int(args.epochs_override)
+    if args.supervision_override is not None:
+        param_training["stage2"]["supervision"] = str(args.supervision_override)
+    if args.learn_target_override is not None:
+        param_training["stage2"]["learn_target"] = str(args.learn_target_override)
+    if args.model_dir_override is not None:
+        param_training["stage2"]["model_dir"] = str(args.model_dir_override)
+    if args.batch_size_override is not None:
+        param_training["stage2"]["batch_size"] = int(args.batch_size_override)
+    if args.lr_override is not None:
+        param_training["stage2"]["lr"] = float(args.lr_override)
+    if args.feq_mode_override is not None:
+        param_training.setdefault("model", {})["feq_mode"] = str(args.feq_mode_override)
+    if args.geq_mode_override is not None:
+        param_training.setdefault("model", {})["geq_mode"] = str(args.geq_mode_override)
     model_config = get_model_config(param_training)
     number_of_rollout = param_training["stage2"]["N"]
     supervision_mode = param_training["stage2"].get("supervision", "geq").lower()
     if supervision_mode not in {"geq", "feq", "exact_macro", "macro"}:
         raise ValueError(f"Unsupported stage-2 supervision mode: {supervision_mode}")
     learn_target = resolve_stage_target(param_training["stage2"])
+    if learn_target == "both" and supervision_mode not in {"exact_macro", "macro"}:
+        raise ValueError("learn_target=both is only supported for macro-based stage-2 supervision.")
+    use_analytic_feq = learn_target == "geq"
+    use_analytic_geq = learn_target == "feq"
+    needs_model_feq_base = False
+    needs_model_geq_base = learn_target in {"geq", "both"} and model_config["geq_mode"] == "constrained"
 
-    if "TVD" in param_training["stage2"]:
+    if "TVD" in param_training["stage2"] and not args.disable_tvd:
         args.TVD = True
 
 
@@ -112,14 +147,12 @@ if __name__ == "__main__":
         alpha_layer=[4] + [param_training["hidden_dim"]] * param_training["num_layers"],
         phi_layer=[2] + [param_training["hidden_dim"]] * param_training["num_layers"],
         activation='relu',
-        learn_feq=learn_target == "feq",
-        learn_geq=learn_target == "geq",
+        learn_feq=learn_target in {"feq", "both"},
+        learn_geq=learn_target in {"geq", "both"},
         feq_mode=model_config["feq_mode"],
         geq_mode=model_config["geq_mode"],
         cv=1.0 / (case_params["vuy"] - 1.0),
         logit_clip=model_config["logit_clip"],
-        feq_base_measure=model_config["feq_base_measure"],
-        geq_base_measure=model_config["geq_base_measure"],
         newton_iters=model_config["newton_iters"],
         newton_tolerance=model_config["newton_tolerance"],
     ).to(device=device, dtype=dtype)
@@ -219,18 +252,43 @@ if __name__ == "__main__":
                 rho, ux, uy, E = sod_solver.get_macroscopic(Fi0, Gi0)
                 T = sod_solver.get_temp_from_energy(ux, uy, E)
                 inputs = torch.stack([rho, ux, uy, T], dim=1)
-                equilibrium_pred_flat = model(inputs, basis)
-                equilibrium_pred = equilibrium_pred_flat.reshape(batch_size, sod_solver.Y, sod_solver.X, sod_solver.Qn).permute(0, 3, 1, 2)
-                if learn_target == "geq":
-                    Feq = sod_solver.get_Feq(rho, ux, uy, T)
-                    Geq = equilibrium_pred
-                else:
-                    Feq = equilibrium_pred
+                Feq_base = None
+                Geq_base = None
+                if use_analytic_feq or needs_model_feq_base:
+                    Feq_base = sod_solver.get_Feq(rho, ux, uy, T)
+                if use_analytic_geq or needs_model_geq_base:
                     if khi is None:
                         khi = torch.zeros_like(ux)
                         zetax = torch.zeros_like(ux)
                         zetay = torch.zeros_like(ux)
-                    Geq, khi, zetax, zetay = sod_solver.get_Geq_Newton_solver(rho, ux, uy, T, khi, zetax, zetay)
+                    Geq_base, khi, zetax, zetay = sod_solver.get_Geq_Newton_solver(
+                        rho,
+                        ux,
+                        uy,
+                        T,
+                        khi,
+                        zetax,
+                        zetay,
+                    )
+                equilibrium_pred = model(
+                    inputs,
+                    basis,
+                    feq_base=Feq_base if needs_model_feq_base else None,
+                    geq_base=Geq_base if needs_model_geq_base else None,
+                )
+                if learn_target == "both":
+                    Feq_pred_flat, Geq_pred_flat = equilibrium_pred
+                    Feq = Feq_pred_flat.reshape(batch_size, sod_solver.Y, sod_solver.X, sod_solver.Qn).permute(0, 3, 1, 2)
+                    Geq = Geq_pred_flat.reshape(batch_size, sod_solver.Y, sod_solver.X, sod_solver.Qn).permute(0, 3, 1, 2)
+                else:
+                    equilibrium_pred_flat = equilibrium_pred
+                    equilibrium_pred = equilibrium_pred_flat.reshape(batch_size, sod_solver.Y, sod_solver.X, sod_solver.Qn).permute(0, 3, 1, 2)
+                    if learn_target == "geq":
+                        Feq = Feq_base
+                        Geq = equilibrium_pred
+                    else:
+                        Feq = equilibrium_pred
+                        Geq = Geq_base
                 Fi_next, Gi_next = sod_solver.collision(Fi0, Gi0, Feq, Geq, rho, ux, uy, T)
                 Fi_next, Gi_next = sod_solver.streaming(Fi_next, Gi_next)
 
@@ -298,18 +356,43 @@ if __name__ == "__main__":
                 rho, ux, uy, E = sod_solver.get_macroscopic(Fi0, Gi0)
                 T = sod_solver.get_temp_from_energy(ux, uy, E)
                 inputs = torch.stack([rho, ux, uy, T], dim=1)
-                equilibrium_pred_flat = model(inputs, basis)
-                equilibrium_pred = equilibrium_pred_flat.reshape(1, sod_solver.Y, sod_solver.X, sod_solver.Qn).permute(0, 3, 1, 2)
-                if learn_target == "geq":
-                    Feq = sod_solver.get_Feq(rho, ux, uy, T)
-                    Geq = equilibrium_pred
-                else:
-                    Feq = equilibrium_pred
+                Feq_base = None
+                Geq_base = None
+                if use_analytic_feq or needs_model_feq_base:
+                    Feq_base = sod_solver.get_Feq(rho, ux, uy, T)
+                if use_analytic_geq or needs_model_geq_base:
                     if khi is None:
                         khi = torch.zeros_like(ux)
                         zetax = torch.zeros_like(ux)
                         zetay = torch.zeros_like(ux)
-                    Geq, khi, zetax, zetay = sod_solver.get_Geq_Newton_solver(rho, ux, uy, T, khi, zetax, zetay)
+                    Geq_base, khi, zetax, zetay = sod_solver.get_Geq_Newton_solver(
+                        rho,
+                        ux,
+                        uy,
+                        T,
+                        khi,
+                        zetax,
+                        zetay,
+                    )
+                equilibrium_pred = model(
+                    inputs,
+                    basis,
+                    feq_base=Feq_base if needs_model_feq_base else None,
+                    geq_base=Geq_base if needs_model_geq_base else None,
+                )
+                if learn_target == "both":
+                    Feq_pred_flat, Geq_pred_flat = equilibrium_pred
+                    Feq = Feq_pred_flat.reshape(1, sod_solver.Y, sod_solver.X, sod_solver.Qn).permute(0, 3, 1, 2)
+                    Geq = Geq_pred_flat.reshape(1, sod_solver.Y, sod_solver.X, sod_solver.Qn).permute(0, 3, 1, 2)
+                else:
+                    equilibrium_pred_flat = equilibrium_pred
+                    equilibrium_pred = equilibrium_pred_flat.reshape(1, sod_solver.Y, sod_solver.X, sod_solver.Qn).permute(0, 3, 1, 2)
+                    if learn_target == "geq":
+                        Feq = Feq_base
+                        Geq = equilibrium_pred
+                    else:
+                        Feq = equilibrium_pred
+                        Geq = Geq_base
                 Fi_next, Gi_next = sod_solver.collision(Fi0, Gi0, Feq, Geq, rho, ux, uy, T)
                 Fi_next, Gi_next = sod_solver.streaming(Fi_next, Gi_next)
 

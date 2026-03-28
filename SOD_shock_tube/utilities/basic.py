@@ -151,8 +151,6 @@ def get_model_config(config):
     return {
         "feq_mode": str(model_config.get("feq_mode", "positive")).lower(),
         "geq_mode": str(model_config.get("geq_mode", "positive")).lower(),
-        "feq_base_measure": str(model_config.get("feq_base_measure", "d2q9")).lower(),
-        "geq_base_measure": str(model_config.get("geq_base_measure", "d2q9")).lower(),
         "logit_clip": model_config.get("logit_clip", 15.0),
         "newton_iters": int(model_config.get("newton_iters", 20)),
         "newton_tolerance": float(model_config.get("newton_tolerance", 1e-6)),
@@ -165,7 +163,7 @@ def resolve_stage_target(stage_config):
         return supervision
     if supervision in {"macro", "exact_macro"}:
         target = str(stage_config.get("learn_target", "geq")).lower()
-        if target not in {"feq", "geq"}:
+        if target not in {"feq", "geq", "both"}:
             raise ValueError(f"Unsupported learn_target '{target}'.")
         return target
     raise ValueError(f"Unsupported supervision mode '{supervision}'.")
