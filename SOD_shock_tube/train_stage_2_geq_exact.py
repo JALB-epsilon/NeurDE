@@ -38,6 +38,12 @@ def levermore_shape_kl(pred_population, base_population, eps=1.0e-12):
     return (base_shape * (base_shape.log() - pred_shape.log())).sum(dim=1).mean()
 
 
+def energy_moment_relative_error(population, rho, ux, uy, T, cv, eps=1.0e-12):
+    target_energy = 2.0 * rho * (cv * T + 0.5 * (ux.square() + uy.square()))
+    actual_energy = population.sum(dim=1)
+    return ((actual_energy - target_energy).abs() / (target_energy.abs() + eps)).mean()
+
+
 def linear_decay_weight(epoch, base_weight, decay_epochs):
     if base_weight <= 0.0:
         return 0.0
@@ -83,6 +89,10 @@ if __name__ == "__main__":
     parser.add_argument("--logit_clip", type=float, default=15.0)
     parser.add_argument("--shape_anchor_weight", type=float, default=0.0)
     parser.add_argument("--shape_anchor_decay_epochs", type=int, default=0)
+    parser.add_argument("--exact_geq_teacher_weight", type=float, default=0.0)
+    parser.add_argument("--exact_geq_teacher_decay_epochs", type=int, default=0)
+    parser.add_argument("--soft_energy_weight", type=float, default=0.0)
+    parser.add_argument("--soft_energy_decay_epochs", type=int, default=0)
     args = parser.parse_args()
 
     device = get_device(args.device)
@@ -194,6 +204,12 @@ if __name__ == "__main__":
     if args.shape_anchor_weight > 0.0:
         decay_desc = args.shape_anchor_decay_epochs if args.shape_anchor_decay_epochs > 0 else "constant"
         print(f"Using Levermore shape anchor: weight={args.shape_anchor_weight}, decay_epochs={decay_desc}")
+    if args.exact_geq_teacher_weight > 0.0:
+        decay_desc = args.exact_geq_teacher_decay_epochs if args.exact_geq_teacher_decay_epochs > 0 else "constant"
+        print(f"Using exact-Sod Geq teacher: weight={args.exact_geq_teacher_weight}, decay_epochs={decay_desc}")
+    if args.soft_energy_weight > 0.0:
+        decay_desc = args.soft_energy_decay_epochs if args.soft_energy_decay_epochs > 0 else "constant"
+        print(f"Using soft energy penalty: weight={args.soft_energy_weight}, decay_epochs={decay_desc}")
 
     best_loss = float("inf")
     best_path = None
@@ -203,6 +219,16 @@ if __name__ == "__main__":
             epoch=epoch,
             base_weight=args.shape_anchor_weight,
             decay_epochs=args.shape_anchor_decay_epochs,
+        )
+        exact_geq_teacher_weight = linear_decay_weight(
+            epoch=epoch,
+            base_weight=args.exact_geq_teacher_weight,
+            decay_epochs=args.exact_geq_teacher_decay_epochs,
+        )
+        soft_energy_weight = linear_decay_weight(
+            epoch=epoch,
+            base_weight=args.soft_energy_weight,
+            decay_epochs=args.soft_energy_decay_epochs,
         )
 
         for batch_idx, (F_seq, G_seq, _, _) in enumerate(dataloader):
@@ -222,6 +248,9 @@ if __name__ == "__main__":
             T_old = None
             rho_old = None
             tvd_weight = 15.0
+            exact_khi = None
+            exact_zetax = None
+            exact_zetay = None
 
             for rollout in range(param_training["stage2"]["N"]):
                 rho, ux, uy, E = sod_solver.get_macroscopic(Fi0, Gi0)
@@ -236,11 +265,50 @@ if __name__ == "__main__":
                             rho, ux, uy, T, khi, zetax, zetay
                         )
                     total_loss = total_loss + shape_anchor_weight * levermore_shape_kl(Geq_pred, geq_anchor)
+                if soft_energy_weight > 0.0 and args.geq_mode == "positive":
+                    total_loss = total_loss + soft_energy_weight * energy_moment_relative_error(
+                        Geq_pred,
+                        rho,
+                        ux,
+                        uy,
+                        T,
+                        sod_solver.Cv,
+                    )
+                current_idx = batch_indices + rollout
+                if exact_geq_teacher_weight > 0.0 and args.geq_mode in {"positive", "positive_energy"}:
+                    exact_rho_step = exact_rho[current_idx]
+                    exact_ux_step = exact_ux[current_idx]
+                    exact_uy_step = exact_uy[current_idx]
+                    exact_T_step = exact_T[current_idx]
+                    with torch.no_grad():
+                        exact_geq_target, exact_khi, exact_zetax, exact_zetay = sod_solver.get_Geq_Newton_solver_batch(
+                            exact_rho_step,
+                            exact_ux_step,
+                            exact_uy_step,
+                            exact_T_step,
+                            exact_khi,
+                            exact_zetax,
+                            exact_zetay,
+                        )
+                    exact_geq_pred, _, _, _ = predict_geq(
+                        model,
+                        sod_solver,
+                        basis,
+                        exact_rho_step,
+                        exact_ux_step,
+                        exact_uy_step,
+                        exact_T_step,
+                        args.geq_mode,
+                    )
+                    total_loss = total_loss + exact_geq_teacher_weight * levermore_shape_kl(
+                        exact_geq_pred,
+                        exact_geq_target,
+                    )
                 Fi0, Gi0 = sod_solver.collision(Fi0, Gi0, Feq, Geq_pred, rho, ux, uy, T)
                 Fi0, Gi0 = sod_solver.streaming(Fi0, Gi0)
                 rho_next, ux_next, uy_next, E_next = sod_solver.get_macroscopic(Fi0, Gi0)
                 T_next = sod_solver.get_temp_from_energy(ux_next, uy_next, E_next)
-                target_idx = batch_indices + rollout + 1
+                target_idx = current_idx + 1
                 pred_macro = torch.stack([rho_next, ux_next, uy_next, T_next], dim=1)
                 target_macro = torch.stack(
                     [exact_rho[target_idx], exact_ux[target_idx], exact_uy[target_idx], exact_T[target_idx]],
