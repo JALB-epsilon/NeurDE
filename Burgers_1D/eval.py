@@ -19,6 +19,18 @@ from burgers_solver import (
     resolve_torch_dtype,
 )
 
+DATASET_STYLE = {
+    "color": "#0047ff",
+    "linewidth": 3.0,
+    "linestyle": "-",
+}
+
+NEURDE_STYLE = {
+    "color": "#ff7f0e",
+    "linewidth": 2.2,
+    "linestyle": "--",
+}
+
 
 def compute_split_index(total_steps, train_fraction):
     split = int(total_steps * train_fraction)
@@ -47,8 +59,8 @@ def model_output_slug(model_path):
 
 def plot_rollout_state(x, prediction, target, global_step, time_value, output_path, failure_step=None):
     plt.figure(figsize=(10, 4))
-    plt.plot(x, target.numpy(), label="dataset", linewidth=2)
-    plt.plot(x, prediction.numpy(), label="nn", linewidth=2)
+    plt.plot(x, target.numpy(), label="dataset", **DATASET_STYLE)
+    plt.plot(x, prediction.numpy(), label="NeurDE", **NEURDE_STYLE)
     plt.xlabel("x")
     plt.ylabel("u")
     title = f"Burgers Holdout Rollout at step {global_step} (t={time_value:.4f})"
@@ -70,8 +82,8 @@ def plot_snapshot_grid(x, snapshots, output_path):
     fig, axes = plt.subplots(rows, columns, figsize=(5 * columns, 3.5 * rows), squeeze=False)
 
     for ax, snapshot in zip(axes.flat, snapshots):
-        ax.plot(x, snapshot["target"].numpy(), label="dataset", linewidth=2)
-        ax.plot(x, snapshot["prediction"].numpy(), label="nn", linewidth=2)
+        ax.plot(x, snapshot["target"].numpy(), label="dataset", **DATASET_STYLE)
+        ax.plot(x, snapshot["prediction"].numpy(), label="NeurDE", **NEURDE_STYLE)
         ax.set_title(f"step {snapshot['global_step']} | t={snapshot['time_value']:.4f} | rel={snapshot['rel_error']:.4f}")
         ax.set_xlabel("x")
         ax.set_ylabel("u")
