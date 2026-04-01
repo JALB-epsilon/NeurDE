@@ -1,0 +1,146 @@
+case: NACA0012_aerofoil
+paper:
+  doi: 10.1016/j.compfluid.2022.105701
+  source: https://www.sciencedirect.com/science/article/pii/S0045793022002948
+  verified_from: user_supplied_benchmark_excerpt
+lattice:
+  Qn: 9
+thermodynamics:
+  Pr: 0.71
+  gamma: 1.4
+geometry:
+  profile: NACA0012
+benchmark_scenarios:
+  transonic:
+    Ma_inf:
+      - 0.8
+      - 0.9
+    Re: 500.0
+    angle_of_attack_deg: 0.0
+    shifted_velocity: 0.2u_inf
+    domain:
+      extent_in_chords:
+        x: 20.0
+        y: 20.0
+      chord_resolution: 100
+    aerofoil_position:
+      note: Head at 6.75C
+      head_x_over_C: 6.75
+      head_y_over_C: null
+      visualization_head_y_over_C: 10.0
+    boundary_conditions:
+      inlet:
+        type: dirichlet
+        fields:
+          - velocity
+          - temperature
+          - density
+      outlet:
+        type: neumann
+        fields:
+          - velocity
+          - temperature
+          - density
+      top:
+        type: freestream
+      bottom:
+        type: freestream
+      wall:
+        type: no_slip_no_penetration
+        flow: no_slip
+        thermal_density: no_penetration
+  supersonic:
+    Ma_inf: 1.5
+    Re_range:
+      min: 10000.0
+      max: 10000000.0
+    angle_of_attack_deg: 0.0
+    shifted_velocity: 0.4u_inf
+    domain:
+      extent_in_chords:
+        x: 7.0
+        y: 4.0
+      chord_resolutions:
+        - 150
+        - 300
+      lattice_domains:
+        - C: 150
+          X: 1050
+          Y: 600
+          Re_values:
+            - 10000.0
+        - C: 300
+          X: 2100
+          Y: 1200
+          Re_values:
+            - 1000000.0
+            - 10000000.0
+    aerofoil_position:
+      note: Head at 2C/3
+      head_x_over_C: 0.6666666667
+      head_y_over_C: null
+      visualization_head_y_over_C: 2.0
+    boundary_conditions:
+      inlet:
+        type: dirichlet
+        fields:
+          - velocity
+          - temperature
+          - density
+      outlet:
+        type: neumann
+        fields:
+          - velocity
+          - temperature
+          - density
+      top:
+        type: freestream
+      bottom:
+        type: freestream
+      wall:
+        type: no_slip_no_penetration
+        flow: no_slip
+        thermal_density: no_penetration
+numerical_implementation:
+  shifted_lattice_interpolation:
+    enabled: true
+    method: inverse_distance_weighted_interpolation
+    applies_before_streaming: true
+  stabilization:
+    local_relaxation_time:
+      enabled: true
+      trigger: local_knudsen_number
+      note: sigma(epsilon) correction for high-Re stability
+related_literature:
+  predecessor_open_benchmark:
+    citation: "Frapolli et al., Entropy 2020"
+    source: "https://pmc.ncbi.nlm.nih.gov/articles/PMC7516843/"
+    benchmark:
+      Ma_inf: 1.5
+      Re: 10000.0
+      angle_of_attack_deg: 0.0
+      chord_resolution: 800
+  related_open_bc_family:
+    citation: "Coreixas et al., Philosophical Transactions A 2020"
+    source: "https://pmc.ncbi.nlm.nih.gov/articles/PMC7333948/"
+    benchmark:
+      Ma_inf: 1.5
+      Re: 10000.0
+      domain:
+        extent_in_chords:
+          x: 8.0
+          y: 8.0
+        chord_resolution: 350
+      boundary_conditions:
+        left: freestream
+        right: first_order_neumann
+        top: freestream
+        bottom: freestream
+        wall: half_way_bounce_back_no_slip
+  derivative_implementation_note:
+    citation: "FAU master thesis 2024"
+    source: "https://www10.cs.fau.de/publications/theses/2024/Master_RathnayakeSudesh.pdf"
+    note: "Uses the same BC family for a Ma=1.5, Re=1e4 NACA0012 case."
+notes:
+  - Benchmark scenarios and BCs now reflect the user-supplied paper excerpt in-thread.
+  - "visualization_head_y_over_C is only for schematic plotting because the vertical placement was not specified in the excerpt."

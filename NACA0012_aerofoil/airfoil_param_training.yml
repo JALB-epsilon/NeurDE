@@ -1,0 +1,36 @@
+hidden_dim: 32
+num_layers: 4
+data_dir: null
+model:
+  feq_mode: positive
+  geq_mode: positive
+  logit_clip: 15.0
+  newton_iters: 20
+  newton_tolerance: 1.0e-6
+stage1:
+  supervision: geq
+  epochs: 1000
+  lr: 1.0e-3
+  model_dir: results/stage1
+  scheduler: CosineAnnealingWarmRestarts
+  scheduler_config:
+    CosineAnnealingWarmRestarts:
+      T_0: 500 
+      T_mult: 2
+      eta_min: 5.01e-6
+stage2:
+  supervision: geq
+  epochs: 1000
+  lr: 1.0e-5
+  model_dir: results/stage2
+  N: 20
+  scheduler: OneCycleLR
+  scheduler_config:
+    OneCycleLR:
+      max_lr: 1.0e-4 
+      pct_start: 0.3
+      div_factor: 10
+      final_div_factor: 100
+notes:
+  - Placeholder config only.
+  - Do not train this case until the paper benchmark geometry, domain, and BCs are ported.
