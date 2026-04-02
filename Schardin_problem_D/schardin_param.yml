@@ -1,0 +1,47 @@
+case: Schardin_problem_D
+paper:
+  doi: 10.1103/PhysRevE.93.063302
+  source: https://journals.aps.org/pre/abstract/10.1103/PhysRevE.93.063302
+  benchmark_name: Schardin problem D
+notes:
+  - "The wedge side is resolved with 300 cells, matching the accessible Frapolli benchmark summary."
+  - "The solver now uses a D2Q49 multispeed lattice built from V7 = {0, +/-1, +/-2, +/-3} and a numerical entropic equilibrium solve."
+  - "Initialization follows open Schardin reproductions: a pure right-moving Mach-1.34 shock moving into quiescent gas with rho=1.4 and p=1.0."
+  - "The wedge apex faces the incoming shock, and the shock is initialized at the apex location x/L = 1."
+  - "The left boundary is kept at the post-shock state, the outlet reuses previous-step populations, and only populations missing at the wedge are reconstructed."
+paper_resolution:
+  wedge_side_points: 300
+domain:
+  x_over_wedge_side: 4.0
+  y_over_wedge_side: 4.5
+geometry:
+  shape: equilateral_triangle
+  apex_x_over_side: 1.0
+  center_y_over_side: 2.25
+  apex_points_right: false
+shock:
+  mach: 1.34
+  initial_x_over_side: 1.0
+  half_width_cells: 3.0
+flow:
+  Re_wedge: 2000.0
+gas:
+  gamma: 1.4
+  Pr: 0.71
+  rho_pre: 1.4
+  p_pre: 1.0
+lattice:
+  name: D2Q49
+  Qn: 49
+  shift_fraction: 0.6
+  newton_iters: 8
+  newton_tolerance: 1.0e-8
+boundary_conditions:
+  inlet: fixed_postshock
+  outlet: previous_step_populations
+  top_bottom: previous_step_populations
+  wall: no_slip
+  wall_thermal: adiabatic
+wall:
+  rho: 1.4
+  T: 0.7142857142857143
